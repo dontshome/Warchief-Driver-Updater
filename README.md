@@ -7,6 +7,11 @@ and forges (downloads) it for you with one click — all wrapped in a dark iron-
 > Unofficial fan project. Not affiliated with or endorsed by Blizzard Entertainment, NVIDIA, or AMD.
 > World of Warcraft and the Horde are trademarks of Blizzard Entertainment.
 
+<p align="center">
+  <img src="assets/screenshots/horde-theme.png" alt="Warchief Driver Updater - Horde theme" width="49%">
+  <img src="assets/screenshots/alliance-theme.png" alt="Warchief Driver Updater - Alliance theme" width="49%">
+</p>
+
 ## Features
 
 - ⚔🦁 **Pick your faction** — one click in the title bar switches between the **Horde** theme

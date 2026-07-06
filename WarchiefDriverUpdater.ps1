@@ -764,6 +764,13 @@ function Set-Theme([string]$name) {
         try { $window.Icon = [Windows.Media.Imaging.BitmapFrame]::Create([Uri]$ico) } catch {}
         Update-ShortcutIcons $ico
     }
+
+    # re-word any "up to date" cards so they don't keep praising the other faction
+    if ($script:Cards) {
+        foreach ($c in $script:Cards.Values) {
+            if ($c.IsUpToDate) { $c.StatusText.Text = $t.UpToDate }
+        }
+    }
 }
 
 $BtnFaction.Add_Click({
@@ -963,6 +970,7 @@ function Apply-CheckResult([int]$idx, $r) {
         $c.State = 'ready'
         $c.BtnAction.IsEnabled = $true
     } elseif ($upd -eq $false) {
+        $c.IsUpToDate = $true
         $c.StatusText.Text = $script:T.UpToDate
         $c.StatusText.Foreground = $script:ColGood
         $c.State = 'ready'   # allow re-download anyway
