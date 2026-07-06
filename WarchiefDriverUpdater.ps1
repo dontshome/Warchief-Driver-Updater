@@ -30,13 +30,14 @@ $script:ConfigDir  = Join-Path $env:APPDATA 'WarchiefDriverUpdater'
 $script:ConfigPath = Join-Path $script:ConfigDir 'config.json'
 
 function Get-AppConfig {
-    $cfg = @{ Theme = 'horde'; SlimInstall = $true }
+    $cfg = @{ Theme = 'horde'; SlimInstall = $true; NvidiaStudio = $false }
     try {
         if (Test-Path $script:ConfigPath) {
             $saved = Get-Content $script:ConfigPath -Raw | ConvertFrom-Json
             if ($saved.Theme -in 'horde', 'alliance') { $cfg.Theme = $saved.Theme }
             if ($null -ne $saved.SlimInstall) { $cfg.SlimInstall = [bool]$saved.SlimInstall }
             elseif ($null -ne $saved.SlimNvidia) { $cfg.SlimInstall = [bool]$saved.SlimNvidia }  # pre-1.2 config
+            if ($null -ne $saved.NvidiaStudio) { $cfg.NvidiaStudio = [bool]$saved.NvidiaStudio }
         }
     } catch {}
     return $cfg
@@ -164,8 +165,10 @@ function Get-Web([string]$Url, [string]$Referer) {
 
 # --- NVIDIA -----------------------------------------------------------------
 # 1) map GPU name -> psid/pfid via NVIDIA's public lookup XML
-# 2) query the AjaxDriverService for the newest WHQL Game Ready driver
-function Get-NvidiaLatest([string]$GpuName, [int]$OsId) {
+# 2) query the AjaxDriverService for the newest Game Ready (or Studio) driver
+#    Studio drivers need upCRD=1&isWHQL=0 (they are WHQL-certified, but the
+#    API only returns them with that combination).
+function Get-NvidiaLatest([string]$GpuName, [int]$OsId, [bool]$Studio = $false) {
     $xmlText = Get-Web 'https://www.nvidia.com/Download/API/lookupValueSearch.aspx?TypeID=3'
     [xml]$xml = $xmlText
     $entries  = $xml.LookupValueSearch.LookupValues.LookupValue
@@ -179,9 +182,10 @@ function Get-NvidiaLatest([string]$GpuName, [int]$OsId) {
     if (-not $match) { return @{ Error = "GPU '$clean' not found in NVIDIA's product list." } }
 
     $psid = $match.ParentID; $pfid = $match.Value
+    $flavor = if ($Studio) { 'upCRD=1&isWHQL=0' } else { 'upCRD=0&isWHQL=1' }
     $api  = "https://gfwsl.geforce.com/services_toolkit/services/com/nvidia/services/AjaxDriverService.php" +
             "?func=DriverManualLookup&psid=$psid&pfid=$pfid&osID=$OsId&languageCode=1033" +
-            "&beta=0&isWHQL=1&dltype=-1&dch=1&upCRD=0&qnf=0&sort1=0&numberOfResults=1"
+            "&beta=0&dltype=-1&dch=1&qnf=0&sort1=0&numberOfResults=1&$flavor"
     $json = (Get-Web $api) | ConvertFrom-Json
     if ($json.Success -ne '1' -or -not $json.IDS) { return @{ Error = 'NVIDIA returned no driver for this GPU/OS.' } }
 
@@ -202,19 +206,30 @@ function Get-NvidiaLatest([string]$GpuName, [int]$OsId) {
 # GPU name and scrape the first one that answers.
 function Get-AmdLatest([string]$GpuName, [string]$OsTag) {
     $manualUrl = 'https://www.amd.com/en/support/download/drivers.html'
-    $m = [regex]::Match($GpuName, '(?i)RX\s*(\d{3,4})\s*(XTX|XT|GRE|M|S)?')
-    if (-not $m.Success) {
+    if ($GpuName -notmatch '(?i)Radeon') {
         return @{ Error = 'Could not map this AMD GPU to a driver page. Use the AMD site button.'; Notes = $manualUrl }
     }
-    $model  = $m.Groups[1].Value
-    $suffix = $m.Groups[2].Value.ToLower()
-    $series = if ($model.Length -eq 4) { "$($model.Substring(0,1))000" } else { "$($model.Substring(0,1))00" }
-    $slug   = "amd-radeon-rx-$model"; if ($suffix) { $slug += "-$suffix" }
 
-    $candidates = @(
-        "https://www.amd.com/en/support/downloads/drivers.html/graphics/radeon-rx/radeon-rx-$series-series/$slug.html",
-        "https://www.amd.com/en/support/downloads/drivers.html/graphics/radeon-rx/radeon-rx-$series-series/amd-radeon-rx-$model$suffix.html",
-        "https://www.amd.com/en/support/downloads/drivers.html/graphics/radeon-$series-series/radeon-rx-$model$(if($suffix){"-$suffix"}).html"
+    $candidates = @()
+    $m = [regex]::Match($GpuName, '(?i)RX\s*(\d{3,4})\s*(XTX|XT|GRE|M|S)?')
+    if ($m.Success) {
+        $model  = $m.Groups[1].Value
+        $suffix = $m.Groups[2].Value.ToLower()
+        $series = if ($model.Length -eq 4) { "$($model.Substring(0,1))000" } else { "$($model.Substring(0,1))00" }
+        $slug   = "amd-radeon-rx-$model"; if ($suffix) { $slug += "-$suffix" }
+        $candidates += @(
+            "https://www.amd.com/en/support/downloads/drivers.html/graphics/radeon-rx/radeon-rx-$series-series/$slug.html",
+            "https://www.amd.com/en/support/downloads/drivers.html/graphics/radeon-rx/radeon-rx-$series-series/amd-radeon-rx-$model$suffix.html",
+            "https://www.amd.com/en/support/downloads/drivers.html/graphics/radeon-$series-series/radeon-rx-$model$(if($suffix){"-$suffix"}).html"
+        )
+    }
+    # AMD ships ONE unified Adrenalin package for all supported Radeon dGPUs
+    # and Ryzen APU graphics, so if the card-specific page can't be found
+    # (renamed page, APU, layout change) any current product page yields the
+    # right installer. These act as evergreen fallbacks.
+    $candidates += @(
+        'https://www.amd.com/en/support/downloads/drivers.html/graphics/radeon-rx/radeon-rx-7000-series/amd-radeon-rx-7900-xtx.html',
+        'https://www.amd.com/en/support/downloads/drivers.html/graphics/radeon-rx/radeon-rx-7000-series/amd-radeon-rx-7600.html'
     )
 
     foreach ($url in ($candidates | Select-Object -Unique)) {
@@ -243,6 +258,35 @@ function Get-AmdLatest([string]$GpuName, [string]$OsTag) {
         }
     }
     return @{ Error = 'AMD driver page not found for this GPU. Use the AMD site button.'; Notes = $manualUrl }
+}
+
+# --- Intel ------------------------------------------------------------------
+# Intel ships one unified driver for Arc / Iris Xe / UHD (11th gen+). The US
+# download page sits behind bot protection, but intel.cn serves the identical
+# page server-rendered, including the direct downloadmirror.intel.com link.
+function Get-IntelLatest([string]$GpuName) {
+    $notesUrl = 'https://www.intel.com/content/www/us/en/download/785597/intel-arc-iris-xe-graphics-windows.html'
+    if ($GpuName -notmatch '(?i)Arc|Iris|UHD') {
+        return @{ Error = 'Legacy Intel graphics use per-generation drivers. Use the Intel site button.'
+                  Notes = 'https://www.intel.com/content/www/us/en/support/detect.html' }
+    }
+    $pages = @(
+        $notesUrl,
+        'https://www.intel.cn/content/www/cn/zh/download/785597/intel-arc-iris-xe-graphics-windows.html'
+    )
+    foreach ($url in $pages) {
+        try { $html = Get-Web $url } catch { continue }
+        $dl = [regex]::Match($html, '(https://downloadmirror\.intel\.com/[^"''\s<>]+\.exe)')
+        if (-not $dl.Success) { continue }
+        $ver = [regex]::Match($html, '(\d+\.\d+\.101\.\d+)')
+        return @{
+            Version = $(if ($ver.Success) { $ver.Groups[1].Value } else { '' })
+            Url     = $dl.Groups[1].Value
+            Notes   = $notesUrl
+            Title   = 'Intel Arc & Iris Xe Graphics Driver'
+        }
+    }
+    return @{ Error = 'Intel driver page not reachable. Use the Intel site button.'; Notes = $notesUrl }
 }
 
 # --- Download with progress ---------------------------------------------------
@@ -373,15 +417,15 @@ function Invoke-NvidiaSlimInstall([string]$ExePath, [string]$WorkDir, $Sync, [st
 if ($SelfTest) {
     Write-Host "== Warchief Driver Updater self-test ==" -ForegroundColor Yellow
     Write-Host "OS build $script:OsBuild -> NVIDIA osID $script:NvOsId / AMD tag $script:AmdOsTag"
-    Write-Host "Config: theme=$($script:Config.Theme) slimNvidia=$($script:Config.SlimNvidia)"
+    Write-Host "Config: theme=$($script:Config.Theme) slimInstall=$($script:Config.SlimInstall) nvidiaStudio=$($script:Config.NvidiaStudio)"
     $gpus = Get-GpuInventory
     if (-not $gpus) { Write-Host 'No supported GPUs found.'; exit 1 }
     foreach ($g in $gpus) {
         Write-Host "`n[$($g.Vendor)] $($g.Name)  (installed: $($g.Installed))" -ForegroundColor Cyan
         try {
-            $r = if ($g.Vendor -eq 'NVIDIA') { Get-NvidiaLatest $g.Name $script:NvOsId }
+            $r = if ($g.Vendor -eq 'NVIDIA') { Get-NvidiaLatest $g.Name $script:NvOsId $false }
                  elseif ($g.Vendor -eq 'AMD') { Get-AmdLatest $g.Name $script:AmdOsTag }
-                 else { @{ Error = 'Intel not supported yet.' } }
+                 else { Get-IntelLatest $g.Name }
             if ($r.Error) { Write-Host "  ERROR: $($r.Error)" -ForegroundColor Red }
             else {
                 Write-Host "  Latest : $($r.Version)  $(if($r.Date){"($($r.Date))"})"
@@ -390,13 +434,21 @@ if ($SelfTest) {
             }
         } catch { Write-Host "  FAILED: $($_.Exception.Message)" -ForegroundColor Red }
     }
-    # sample AMD lookup so the AMD path is exercised even on NVIDIA-only rigs
-    Write-Host "`n[sample] AMD Radeon RX 7900 XTX" -ForegroundColor Cyan
-    try {
-        $r = Get-AmdLatest 'AMD Radeon RX 7900 XTX' $script:AmdOsTag
-        if ($r.Error) { Write-Host "  ERROR: $($r.Error)" -ForegroundColor Red }
-        else { Write-Host "  Latest : $($r.Version)"; Write-Host "  URL    : $($r.Url)" }
-    } catch { Write-Host "  FAILED: $($_.Exception.Message)" -ForegroundColor Red }
+    # sample lookups so every vendor path is exercised regardless of this rig
+    $samples = @(
+        @{ Label = 'AMD Radeon RX 7900 XTX (dGPU)';   Run = { Get-AmdLatest 'AMD Radeon RX 7900 XTX' $script:AmdOsTag } },
+        @{ Label = 'AMD Radeon(TM) Graphics (APU)';    Run = { Get-AmdLatest 'AMD Radeon(TM) Graphics' $script:AmdOsTag } },
+        @{ Label = 'Intel Arc A770';                   Run = { Get-IntelLatest 'Intel(R) Arc(TM) A770 Graphics' } },
+        @{ Label = 'NVIDIA RTX 3060 (Studio driver)';  Run = { Get-NvidiaLatest 'NVIDIA GeForce RTX 3060' $script:NvOsId $true } }
+    )
+    foreach ($s in $samples) {
+        Write-Host "`n[sample] $($s.Label)" -ForegroundColor Cyan
+        try {
+            $r = & $s.Run
+            if ($r.Error) { Write-Host "  ERROR: $($r.Error)" -ForegroundColor Red }
+            else { Write-Host "  Latest : $($r.Version) $(if($r.Title){"[$($r.Title)]"})"; Write-Host "  URL    : $($r.Url)" }
+        } catch { Write-Host "  FAILED: $($_.Exception.Message)" -ForegroundColor Red }
+    }
     Write-Host "`n[7-Zip] resolver check" -ForegroundColor Cyan
     try { Write-Host "  Tool: $(Get-SevenZip $script:ConfigDir)" } catch { Write-Host "  FAILED: $($_.Exception.Message)" -ForegroundColor Red }
     exit 0
@@ -600,7 +652,10 @@ $mainXaml = @'
               BorderBrush="{DynamicResource PanelBorder}" BorderThickness="0,1,0,0" Padding="16,10">
         <DockPanel>
           <Button x:Name="BtnRefresh" DockPanel.Dock="Right" Content="🐺 SCOUT AGAIN" Margin="10,0,0,0"/>
-          <CheckBox x:Name="ChkSlim" DockPanel.Dock="Right" Content="Slim install (no NVIDIA App / no Adrenalin app)" Margin="10,0,0,0"/>
+          <CheckBox x:Name="ChkStudio" DockPanel.Dock="Right" Content="Studio driver" Margin="10,0,0,0"
+                    ToolTip="NVIDIA only: fetch the Studio driver (for creative apps) instead of Game Ready"/>
+          <CheckBox x:Name="ChkSlim" DockPanel.Dock="Right" Content="Slim install (no vendor apps)" Margin="10,0,0,0"
+                    ToolTip="Driver-only install: strips the NVIDIA App / GeForce Experience or AMD Adrenalin software"/>
           <TextBlock x:Name="StatusBar" Text="Scouting the battlefield for war machines..."
                      Foreground="{DynamicResource Parchment}" FontSize="13" VerticalAlignment="Center"/>
         </DockPanel>
@@ -653,7 +708,7 @@ $cardXaml = @'
 '@
 
 $window = [Windows.Markup.XamlReader]::Parse($mainXaml)
-foreach ($n in 'TitleBar','TitleBarText','BannerTitle','BannerTagline','BtnFaction','BtnMin','BtnClose','BtnRefresh','ChkSlim','StatusBar','CardPanel') {
+foreach ($n in 'TitleBar','TitleBarText','BannerTitle','BannerTagline','BtnFaction','BtnMin','BtnClose','BtnRefresh','ChkSlim','ChkStudio','StatusBar','CardPanel') {
     Set-Variable -Name $n -Value $window.FindName($n)
 }
 
@@ -723,6 +778,13 @@ $ChkSlim.Add_Click({
     Save-AppConfig
 })
 
+$ChkStudio.IsChecked = [bool]$script:Config.NvidiaStudio
+$ChkStudio.Add_Click({
+    $script:Config.NvidiaStudio = [bool]$ChkStudio.IsChecked
+    Save-AppConfig
+    Start-Scan   # Game Ready vs Studio changes the answer — scout again
+})
+
 Set-Theme $script:Config.Theme
 
 # ---------------------------------------------------------------------------
@@ -762,6 +824,7 @@ function New-GpuCard($gpu) {
     switch ($gpu.Vendor) {
         'NVIDIA' { $refs.VendorText.Foreground = '#76B900'; $refs.VendorBadge.BorderBrush = '#76B900' }
         'AMD'    { $refs.VendorText.Foreground = '#ED1C24'; $refs.VendorBadge.BorderBrush = '#ED1C24' }
+        'Intel'  { $refs.VendorText.Foreground = '#00A3F5'; $refs.VendorBadge.BorderBrush = '#00A3F5' }
         default  { $refs.VendorText.Foreground = '#8A7A5C'; $refs.VendorBadge.BorderBrush = '#8A7A5C' }
     }
     $refs.State     = 'checking'
@@ -919,9 +982,9 @@ function Start-Scan {
     $script:Sync.CheckDone = $false
     $BtnRefresh.IsEnabled = $false
 
-    $gpus = @(Get-GpuInventory | Where-Object { $_.Vendor -in 'NVIDIA','AMD' })
+    $gpus = @(Get-GpuInventory | Where-Object { $_.Vendor -in 'NVIDIA','AMD','Intel' })
     if (-not $gpus) {
-        $StatusBar.Text = 'No NVIDIA or AMD war machines found in this rig.'
+        $StatusBar.Text = 'No NVIDIA, AMD, or Intel war machines found in this rig.'
         $BtnRefresh.IsEnabled = $true
         $script:Sync.CheckDone = $true
         return
@@ -929,17 +992,19 @@ function Start-Scan {
     foreach ($g in $gpus) { New-GpuCard $g }
     $StatusBar.Text = "Found $($gpus.Count) war machine$(if($gpus.Count -gt 1){'s'}). Scouts riding to the vendors' keeps..."
 
-    $script:Sync.Gpus  = @($gpus | ForEach-Object { @{ Index = $_.Index; Name = $_.Name; Vendor = $_.Vendor } })
-    $script:Sync.NvOs  = $script:NvOsId
-    $script:Sync.AmdOs = $script:AmdOsTag
+    $script:Sync.Gpus     = @($gpus | ForEach-Object { @{ Index = $_.Index; Name = $_.Name; Vendor = $_.Vendor } })
+    $script:Sync.NvOs     = $script:NvOsId
+    $script:Sync.AmdOs    = $script:AmdOsTag
+    $script:Sync.NvStudio = [bool]$ChkStudio.IsChecked
     foreach ($g in $gpus) { $script:Sync.Remove("result$($g.Index)") }
 
     Start-BackgroundScript @'
 foreach ($g in $sync.Gpus) {
     $r = $null
     try {
-        if ($g.Vendor -eq 'NVIDIA') { $r = Get-NvidiaLatest $g.Name $sync.NvOs }
-        else                        { $r = Get-AmdLatest $g.Name $sync.AmdOs }
+        if     ($g.Vendor -eq 'NVIDIA') { $r = Get-NvidiaLatest $g.Name $sync.NvOs $sync.NvStudio }
+        elseif ($g.Vendor -eq 'Intel')  { $r = Get-IntelLatest $g.Name }
+        else                            { $r = Get-AmdLatest $g.Name $sync.AmdOs }
     } catch { $r = @{ Error = $_.Exception.Message } }
     $sync["result$($g.Index)"] = $r
 }

@@ -10,7 +10,7 @@
 #>
 param(
     [switch]$SkipInstaller,
-    [string]$Version = '1.0.0'
+    [string]$Version = '1.3.0'
 )
 $ErrorActionPreference = 'Stop'
 $root   = Split-Path -Parent $MyInvocation.MyCommand.Path

@@ -24,8 +24,12 @@ and forges (downloads) it for you with one click — all wrapped in a dark iron-
     dialog when the installer finishes, with the real installer exit code checked.
   - Uses your installed 7-Zip if present, otherwise fetches the official standalone `7zr.exe`
     (~600 KB) on first use. Untick the checkbox any time to get the stock installer instead.
-- 🐺 **Auto-scouting** — detects every NVIDIA/AMD GPU in your rig via WMI, including the
-  human-readable installed driver version (e.g. `560.94`, not `32.0.15.6094`).
+- 🐺 **Auto-scouting** — detects every NVIDIA, AMD, and Intel GPU in your rig via WMI,
+  including the human-readable installed driver version (e.g. `560.94`, not `32.0.15.6094`).
+  Ryzen APU graphics and Intel Arc / Iris Xe / UHD are matched to their unified driver
+  packages automatically.
+- 🎨 **Game Ready or Studio** — a footer toggle switches NVIDIA lookups between Game Ready
+  and Studio drivers (both WHQL, straight from NVIDIA's API).
 - ⚒ **Straight from the forge** — queries **NVIDIA's official driver lookup API** and **AMD's
   official per-product driver pages**. No third-party mirrors, downloads come directly from
   `download.nvidia.com` / `drivers.amd.com`.
@@ -119,18 +123,20 @@ It prints detected GPUs, installed versions, and the latest driver + download UR
 
 | Vendor | Latest-version source | Download source |
 |---|---|---|
-| NVIDIA | `nvidia.com/Download/API/lookupValueSearch.aspx` (GPU → product IDs), then the `AjaxDriverService` JSON API | `us.download.nvidia.com` (direct link from the API) |
-| AMD | The official per-GPU driver page on `amd.com` (server-rendered; scraped for the Adrenalin version) | `drivers.amd.com` (direct link from that page, sent with the required referer) |
+| NVIDIA | `nvidia.com/Download/API/lookupValueSearch.aspx` (GPU → product IDs), then the `AjaxDriverService` JSON API (Game Ready or Studio) | `us.download.nvidia.com` (direct link from the API) |
+| AMD | The official per-GPU driver page on `amd.com` (server-rendered; scraped for the Adrenalin version), with evergreen fallback pages since AMD ships one unified package for all supported Radeons & APUs | `drivers.amd.com` (direct link from that page, sent with the required referer) |
+| Intel | Intel's official unified Arc/Iris Xe driver page (via the `intel.cn` mirror when the US site's bot protection blocks scripts — same page, same files) | `downloadmirror.intel.com` (Intel's own CDN, direct link from the page) |
 
 Installed versions come from `Win32_VideoController` (NVIDIA's friendly version is decoded from
 the WMI version string) and, for AMD, the `RadeonSoftwareVersion` registry value.
 
 ## Known limits
 
-- AMD's website layout can change; if the scraper can't find your card's page, the tool falls
-  back to an **OPEN VENDOR SITE** button instead of guessing.
-- AMD integrated graphics (Ryzen APUs) and Intel GPUs aren't matched yet — PRs welcome.
-- NVIDIA results are Game Ready WHQL drivers; a Studio-driver toggle is on the wish list.
+- Very old hardware uses legacy driver branches the unified packages don't cover: pre-RX
+  Radeons and pre-11th-gen Intel HD Graphics get an **OPEN VENDOR SITE** button instead of an
+  auto-match. Same graceful fallback if a vendor page is ever unreachable.
+- Intel installs use Intel's stock installer (their package is already light on bloat, so
+  there's no slim mode for it).
 
 ## Contributing
 
