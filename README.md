@@ -40,6 +40,40 @@ and forges (downloads) it for you with one click — all wrapped in a dark iron-
 - 🪶 **Zero dependencies** — pure PowerShell 5.1 + WPF. No Node, no Python, no runtime installs.
   Works on any stock Windows 10/11 machine.
 
+## 🛡 "Will this break my computer?" — a note for cautious dads
+
+No. Sit down, Dad, let's talk. Here is exactly what this thing does, in plain English:
+
+1. **It looks at your PC** and asks Windows "hey, what graphics card is in here?" (Windows
+   already knows; we just ask politely.)
+2. **It asks NVIDIA or AMD** — the actual companies, on their actual official websites — "what's
+   the newest driver for this card?" This is the same thing you'd do by hand in a browser,
+   except you don't have to remember whether you own an RTX or a GTX or a VCR.
+3. **It downloads the driver from NVIDIA's or AMD's own servers.** Not from a forum. Not from
+   `totally-real-drivers-free.biz`. The download link comes straight from the vendor, byte for
+   byte the same file you'd get clicking around their site for 20 minutes.
+4. **Nothing installs until you click the big INSTALL button.** The tool never installs anything
+   behind your back. When you do click it, *Windows itself* will pop up the blue "do you want
+   to allow this?" screen — that's normal, that's Windows doing its job, click Yes.
+
+**"But what if it goes wrong?"** The worst realistic case is the same as any driver update done
+by hand: you'd re-run the installer, or use Windows' built-in driver rollback (Device Manager →
+your GPU → Properties → Driver → Roll Back). Your files, photos, tax spreadsheets, and bookmarked
+fishing videos are never touched. This tool doesn't modify Windows, doesn't run at startup,
+doesn't phone home, has no ads, no accounts, no subscriptions, and no opinions about your
+browser homepage.
+
+**"How do I know it's not up to something?"** It's open source — every single line of code is in
+this repository, readable by anyone, and it's plain PowerShell (a scripting language, not a
+mystery blob). Paranoid? Good instinct! Read [WarchiefDriverUpdater.ps1](WarchiefDriverUpdater.ps1)
+yourself or build the exe from source with one command. The only thing it writes outside its
+own folder is the downloaded driver (to your Downloads folder, where you can see it) and a tiny
+settings file remembering whether you're Horde or Alliance. Which is Horde. Obviously.
+
+**"Can I get rid of it?"** Completely, in one click: Windows Settings → Apps → Installed apps →
+Warchief Driver Updater → Uninstall. It removes itself, its shortcuts, and its settings, and
+leaves your computer exactly as it found it. Not even a goodbye note.
+
 ## Getting started
 
 **Option A — installer (recommended):** grab `WarchiefDriverUpdater-Setup.exe` from the
