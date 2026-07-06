@@ -49,7 +49,7 @@ if ($Uninstall) {
 }
 
 # ---------------------------------------------------------------------------
-$r = Show-Msg "Lok'tar ogar!`n`nInstall $AppName v$AppVersion?`n`nIt will be placed in:`n$InstallDir`n`nNo admin rights required." "$AppName - Setup" 'YesNo' 'Question'
+$r = Show-Msg "Lok'tar ogar!`n`nInstall $AppName v${AppVersion}?`n`nIt will be placed in:`n$InstallDir`n`nNo admin rights required." "$AppName - Setup" 'YesNo' 'Question'
 if ($r -ne 'Yes') { exit 0 }
 
 # stop a running copy before overwriting (upgrade path)

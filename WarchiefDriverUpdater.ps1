@@ -21,6 +21,8 @@ $ErrorActionPreference = 'Stop'
 # ---------------------------------------------------------------------------
 #  Shared constants & config
 # ---------------------------------------------------------------------------
+$script:AppVersion = '1.4.0'   # single source of truth - Build.ps1 reads this to version the exe
+$script:GitHubRepo = 'dontshome/Warchief-Driver-Updater'
 $script:UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
 $script:OsBuild  = [int](Get-CimInstance Win32_OperatingSystem).BuildNumber
 $script:NvOsId   = if ($script:OsBuild -ge 22000) { 135 } else { 57 }   # 135 = Win11, 57 = Win10 x64
@@ -163,6 +165,30 @@ function Get-Web([string]$Url, [string]$Referer) {
     } finally { $resp.Close() }
 }
 
+# --- Self-update check --------------------------------------------------------
+# Asks GitHub's public API for the newest release tag/assets. Never installs
+# anything on its own - it only reports what it found so the UI can ask you.
+function Get-LatestReleaseInfo([string]$Repo) {
+    $req = [Net.HttpWebRequest]::Create("https://api.github.com/repos/$Repo/releases/latest")
+    $req.UserAgent = $UA
+    $req.Accept    = 'application/vnd.github+json'
+    $req.Timeout   = 15000
+    $resp = $req.GetResponse()
+    try {
+        $sr = New-Object IO.StreamReader($resp.GetResponseStream())
+        $json = $sr.ReadToEnd() | ConvertFrom-Json
+    } finally { $resp.Close() }
+
+    $tag = $json.tag_name -replace '^v', ''
+    $setupAsset = $json.assets | Where-Object { $_.name -match 'Setup\.exe$' } | Select-Object -First 1
+    return @{
+        Version    = $tag
+        HtmlUrl    = $json.html_url
+        SetupUrl   = $(if ($setupAsset) { $setupAsset.browser_download_url })
+        SetupName  = $(if ($setupAsset) { $setupAsset.name })
+    }
+}
+
 # --- NVIDIA -----------------------------------------------------------------
 # 1) map GPU name -> psid/pfid via NVIDIA's public lookup XML
 # 2) query the AjaxDriverService for the newest Game Ready (or Studio) driver
@@ -290,13 +316,13 @@ function Get-IntelLatest([string]$GpuName) {
 }
 
 # --- Download with progress ---------------------------------------------------
-function Invoke-FileDownload([string]$Url, [string]$Dest, $Sync, [string]$Referer) {
+function Invoke-FileDownload([string]$Url, [string]$Dest, $Sync, [string]$Referer, [string]$Prefix = '') {
     try {
         $req = [Net.HttpWebRequest]::Create($Url)
         $req.UserAgent = $UA
         if ($Referer) { $req.Referer = $Referer }
         $resp = $req.GetResponse()
-        $Sync.DlTotal = $resp.ContentLength
+        $Sync["${Prefix}DlTotal"] = $resp.ContentLength
         $in  = $resp.GetResponseStream()
         $out = [IO.File]::Create($Dest)
         try {
@@ -305,15 +331,15 @@ function Invoke-FileDownload([string]$Url, [string]$Dest, $Sync, [string]$Refere
             while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) {
                 $out.Write($buf, 0, $n)
                 $done += $n
-                $Sync.DlBytes = $done
+                $Sync["${Prefix}DlBytes"] = $done
             }
         } finally { $out.Close(); $in.Close(); $resp.Close() }
-        $Sync.DlPath = $Dest
+        $Sync["${Prefix}DlPath"] = $Dest
     } catch {
-        $Sync.DlError = $_.Exception.Message
+        $Sync["${Prefix}DlError"] = $_.Exception.Message
         try { if (Test-Path $Dest) { Remove-Item $Dest -Force } } catch {}
     }
-    $Sync.DlDone = $true
+    $Sync["${Prefix}DlDone"] = $true
 }
 
 # --- Slim NVIDIA install ------------------------------------------------------
@@ -415,9 +441,15 @@ function Invoke-NvidiaSlimInstall([string]$ExePath, [string]$WorkDir, $Sync, [st
 #  Self-test mode:  .\WarchiefDriverUpdater.ps1 -SelfTest
 # ---------------------------------------------------------------------------
 if ($SelfTest) {
-    Write-Host "== Warchief Driver Updater self-test ==" -ForegroundColor Yellow
+    Write-Host "== Warchief Driver Updater self-test (v$script:AppVersion) ==" -ForegroundColor Yellow
     Write-Host "OS build $script:OsBuild -> NVIDIA osID $script:NvOsId / AMD tag $script:AmdOsTag"
     Write-Host "Config: theme=$($script:Config.Theme) slimInstall=$($script:Config.SlimInstall) nvidiaStudio=$($script:Config.NvidiaStudio)"
+    Write-Host "`n[Self-update] checking GitHub for the latest release..." -ForegroundColor Cyan
+    try {
+        $rel = Get-LatestReleaseInfo $script:GitHubRepo
+        Write-Host "  Latest release: v$($rel.Version)  $(if ([version]$rel.Version -gt [version]$script:AppVersion) { '(NEWER - update available)' } else { '(up to date)' })"
+        Write-Host "  Setup asset   : $($rel.SetupName)"
+    } catch { Write-Host "  FAILED: $($_.Exception.Message)" -ForegroundColor Red }
     $gpus = Get-GpuInventory
     if (-not $gpus) { Write-Host 'No supported GPUs found.'; exit 1 }
     foreach ($g in $gpus) {
@@ -630,6 +662,7 @@ $mainXaml = @'
           <TextBlock x:Name="TitleBarText" Text="⚔ WARCHIEF DRIVER UPDATER" Foreground="{DynamicResource Gold}"
                      FontWeight="Bold" FontSize="13" VerticalAlignment="Center" Margin="12,0,0,0"/>
           <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button x:Name="BtnUpdate" Content="⚡ UPDATE AVAILABLE" FontSize="11" Padding="10,4" Margin="0,0,8,0" Visibility="Collapsed"/>
             <Button x:Name="BtnFaction" Content="🦁 ALLIANCE" FontSize="11" Padding="10,4" Margin="0"/>
             <Button x:Name="BtnMin"   Content="—" Width="38" Padding="0,4" Margin="0"/>
             <Button x:Name="BtnClose" Content="✕" Width="38" Padding="0,4" Margin="0"/>
@@ -708,7 +741,7 @@ $cardXaml = @'
 '@
 
 $window = [Windows.Markup.XamlReader]::Parse($mainXaml)
-foreach ($n in 'TitleBar','TitleBarText','BannerTitle','BannerTagline','BtnFaction','BtnMin','BtnClose','BtnRefresh','ChkSlim','ChkStudio','StatusBar','CardPanel') {
+foreach ($n in 'TitleBar','TitleBarText','BannerTitle','BannerTagline','BtnUpdate','BtnFaction','BtnMin','BtnClose','BtnRefresh','ChkSlim','ChkStudio','StatusBar','CardPanel') {
     Set-Variable -Name $n -Value $window.FindName($n)
 }
 
@@ -1023,6 +1056,47 @@ $sync.CheckDone = $true
 $BtnRefresh.Add_Click({ Start-Scan })
 
 # ---------------------------------------------------------------------------
+#  Self-update check: ask GitHub for the newest release once at startup.
+#  Never downloads or installs anything by itself - only offers a button.
+# ---------------------------------------------------------------------------
+function Start-UpdateCheck {
+    $script:Sync.UpdateChecked = $false
+    $script:Sync.UpdateRepo    = $script:GitHubRepo
+    Start-BackgroundScript @'
+try { $sync.UpdateInfo = Get-LatestReleaseInfo $sync.UpdateRepo } catch { $sync.UpdateInfo = $null }
+$sync.UpdateChecked = $true
+'@
+}
+
+$BtnUpdate.Add_Click({
+    $info = $script:Sync.UpdateInfo
+    if (-not $info) { return }
+    $r = [Windows.MessageBox]::Show(
+        "A newer version is available!`n`nYou have: v$script:AppVersion`nLatest:   v$($info.Version)`n`nDownload and install it now? (Yes)`nor just open the release page to grab it yourself (No)?",
+        'Warchief Driver Updater - Update Available', 'YesNoCancel', 'Question')
+    if ($r -eq 'Cancel') { return }
+    if ($r -eq 'No') { Start-Process $info.HtmlUrl; return }
+
+    if (-not $info.SetupUrl) {
+        [void][Windows.MessageBox]::Show("Couldn't find the installer in that release. Opening the release page instead.", 'Warchief Driver Updater', 'OK', 'Warning')
+        Start-Process $info.HtmlUrl
+        return
+    }
+
+    $BtnUpdate.IsEnabled = $false
+    $BtnUpdate.Content = '⚡ DOWNLOADING...'
+    $script:Sync.UpdDlActive = $true
+    $script:Sync.UpdDlDone   = $false
+    $script:Sync.UpdDlError  = $null
+    $script:Sync.UpdDlBytes  = 0L
+    $script:Sync.UpdDlTotal  = 0L
+    $script:Sync.UpdUrl      = $info.SetupUrl
+    $script:Sync.UpdDest     = Join-Path $env:TEMP $info.SetupName
+    $StatusBar.Text = "Downloading v$($info.Version)..."
+    Start-BackgroundScript 'Invoke-FileDownload $sync.UpdUrl $sync.UpdDest $sync $null "Upd"'
+})
+
+# ---------------------------------------------------------------------------
 #  UI pump: applies background results every 150 ms
 # ---------------------------------------------------------------------------
 $timer = New-Object Windows.Threading.DispatcherTimer
@@ -1070,6 +1144,46 @@ $timer.Add_Tick({
                     $c.BtnAction.IsEnabled = $true
                     $StatusBar.Text = "Saved to $($c.FilePath)"
                 }
+            }
+        }
+    }
+
+    # self-update check result (once, at startup)
+    if ($script:Sync.UpdateChecked) {
+        $script:Sync.UpdateChecked = $false   # consume once
+        $info = $script:Sync.UpdateInfo
+        if ($info -and $info.Version) {
+            $isNewer = $false
+            try { $isNewer = ([version]$info.Version -gt [version]$script:AppVersion) } catch {}
+            if ($isNewer) {
+                $BtnUpdate.Content = "⚡ UPDATE TO v$($info.Version)"
+                $BtnUpdate.Visibility = 'Visible'
+            }
+        }
+    }
+
+    # self-update download progress
+    if ($script:Sync.UpdDlActive) {
+        $total = [long]$script:Sync.UpdDlTotal
+        $bytes = [long]$script:Sync.UpdDlBytes
+        if ($total -gt 0) {
+            $pct = [Math]::Round(100.0 * $bytes / $total, 0)
+            $StatusBar.Text = "Downloading update: $(Format-Bytes $bytes) / $(Format-Bytes $total)  ($pct%)"
+        }
+        if ($script:Sync.UpdDlDone) {
+            $script:Sync.UpdDlActive = $false
+            if ($script:Sync.UpdDlError) {
+                $BtnUpdate.IsEnabled = $true
+                $BtnUpdate.Content = "⚡ UPDATE TO v$($script:Sync.UpdateInfo.Version)"
+                $StatusBar.Text = 'Update download failed. Try again, or grab it from the release page.'
+                [void][Windows.MessageBox]::Show(
+                    "Couldn't download the update: $($script:Sync.UpdDlError)`n`nOpening the release page instead.",
+                    'Warchief Driver Updater', 'OK', 'Error')
+                Start-Process $script:Sync.UpdateInfo.HtmlUrl
+            } else {
+                $StatusBar.Text = 'Launching the new installer...'
+                Start-Process $script:Sync.UpdDest
+                $window.Close()
             }
         }
     }
@@ -1129,7 +1243,7 @@ $timer.Add_Tick({
 })
 $timer.Start()
 
-$window.Add_ContentRendered({ Start-Scan })
+$window.Add_ContentRendered({ Start-Scan; Start-UpdateCheck })
 [void]$window.ShowDialog()
 
 # cleanup

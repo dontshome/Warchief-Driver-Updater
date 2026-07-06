@@ -10,13 +10,21 @@
 #>
 param(
     [switch]$SkipInstaller,
-    [string]$Version = '1.3.1'
+    [string]$Version   # defaults to $script:AppVersion in WarchiefDriverUpdater.ps1 (single source of truth)
 )
 $ErrorActionPreference = 'Stop'
 $root   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $dist   = Join-Path $root 'dist'
 $assets = Join-Path $root 'assets'
 New-Item -ItemType Directory -Force -Path $dist, $assets | Out-Null
+
+if (-not $Version) {
+    $srcText = Get-Content (Join-Path $root 'WarchiefDriverUpdater.ps1') -Raw
+    $m = [regex]::Match($srcText, "AppVersion\s*=\s*'([\d.]+)'")
+    if (-not $m.Success) { throw "Could not find `$script:AppVersion in WarchiefDriverUpdater.ps1 - pass -Version explicitly." }
+    $Version = $m.Groups[1].Value
+}
+Write-Host "Building version $Version"
 
 if (-not (Get-Module -ListAvailable ps2exe)) {
     Write-Host 'Installing ps2exe module (CurrentUser)...'
