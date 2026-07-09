@@ -1,10 +1,10 @@
 # ⚔ Warchief Driver Updater
 
 **Lok'tar ogar!** A Horde-themed, zero-dependency GPU driver checker & downloader for Windows.
-Detects your NVIDIA / AMD graphics cards, asks the vendors' own servers for the newest driver,
+Detects your NVIDIA / AMD / Intel graphics cards, asks the vendors' own servers for the newest driver,
 and forges (downloads) it for you with one click — all wrapped in a dark iron-and-gold war room UI.
 
-> Unofficial fan project. Not affiliated with or endorsed by Blizzard Entertainment, NVIDIA, or AMD.
+> Unofficial fan project. Not affiliated with or endorsed by Blizzard Entertainment, NVIDIA, AMD, or Intel.
 > World of Warcraft and the Horde are trademarks of Blizzard Entertainment.
 
 <p align="center">
@@ -90,10 +90,10 @@ No. Sit down, Dad, let's talk. Here is exactly what this thing does, in plain En
 
 1. **It looks at your PC** and asks Windows "hey, what graphics card is in here?" (Windows
    already knows; we just ask politely.)
-2. **It asks NVIDIA or AMD** — the actual companies, on their actual official websites — "what's
+2. **It asks NVIDIA, AMD, or Intel** — the actual companies, on their actual official websites — "what's
    the newest driver for this card?" This is the same thing you'd do by hand in a browser,
    except you don't have to remember whether you own an RTX or a GTX or a VCR.
-3. **It downloads the driver from NVIDIA's or AMD's own servers.** Not from a forum. Not from
+3. **It downloads the driver from NVIDIA's, AMD's, or Intel's own servers.** Not from a forum. Not from
    `totally-real-drivers-free.biz`. The download link comes straight from the vendor, byte for
    byte the same file you'd get clicking around their site for 20 minutes.
 4. **Nothing installs until you click the big INSTALL button.** The tool never installs anything
@@ -146,7 +146,7 @@ This auto-installs the [ps2exe](https://www.powershellgallery.com/packages/ps2ex
 `WarchiefDriverUpdater.exe` and `WarchiefDriverUpdater-Setup.exe` into `dist\`.
 
 No admin rights are needed to check or download; the driver installer itself will ask for
-elevation when you click **EQUIP (INSTALL)** — that prompt comes from NVIDIA/AMD's installer,
+elevation when you click **EQUIP (INSTALL)** — that prompt comes from the vendor's installer,
 not from this tool.
 
 ## Headless self-test

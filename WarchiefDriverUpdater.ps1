@@ -1,14 +1,14 @@
 ﻿<#
     ⚔  WARCHIEF DRIVER UPDATER  ⚔
     A Warcraft-faction-themed GPU driver checker & downloader for Windows.
-    Detects NVIDIA / AMD GPUs, checks the vendors' own servers for the
-    newest driver, and downloads it with one click. Pick your side:
+    Detects NVIDIA / AMD / Intel GPUs, checks the vendors' own servers for
+    the newest driver, and downloads it with one click. Pick your side:
     Horde or Alliance. Lok'tar ogar!
 
     "Slim NVIDIA install" unpacks NVIDIA's driver package and installs the
     display driver WITHOUT the NVIDIA App / GeForce Experience / telemetry.
 
-    Unofficial fan project. Not affiliated with Blizzard, NVIDIA or AMD.
+    Unofficial fan project. Not affiliated with Blizzard, NVIDIA, AMD or Intel.
 
     Copyright (C) 2026 dontshome  <https://github.com/dontshome/Warchief-Driver-Updater>
 
@@ -1093,7 +1093,8 @@ $mainXaml = @'
                   <TextBlock TextWrapping="Wrap" Text="• Saves disk space — often 500 MB to 1 GB+"/>
                   <TextBlock TextWrapping="Wrap" Text="• No background telemetry or account login"/>
                   <TextBlock TextWrapping="Wrap" Text="• Fewer auto-start services = less RAM, faster boot"/>
-                  <TextBlock TextWrapping="Wrap" Text="• You still get the full driver and NVIDIA/AMD Control Panel"/>
+                  <TextBlock TextWrapping="Wrap" Text="• You still get the full driver and its control panel"/>
+                  <TextBlock TextWrapping="Wrap" Text="• Intel packages are already lean, so they use the stock installer"/>
                   <TextBlock TextWrapping="Wrap" FontStyle="Italic" Margin="0,6,0,0"
                     Text="The exact amount saved is shown after install. Untick for the vendor's normal installer."/>
                 </StackPanel>
