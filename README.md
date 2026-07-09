@@ -19,7 +19,12 @@ and forges (downloads) it for you with one click — all wrapped in a dark iron-
 - 🛡 **War Chest** — every driver you install is remembered; if a new one betrays you, **re-equip a previous version in one click**. Optionally raises a Windows System Restore point before each install (built-in System Restore, nothing extra).
 - 📡 **The Sentinel** — opt-in scheduled scout (daily/weekly, via Windows Task Scheduler) that checks for new drivers in the background and fires a tray notification when war gear drops. Plus optional minimize-to-tray.
 - 🎮 **Game Ready Radar** — reads the game library files your launchers already keep on disk (Steam manifests, Battle.net/Epic/Ubisoft/EA registrations — nothing new installed) and cross-checks them against the driver's official release notes to show which of *your* games the update tunes.
-- 📊 **Rig Command Center** — live GPU usage, VRAM, and driver age for **all vendors** via Windows' own GPU counters; NVIDIA cards add temperature, clocks, power and fan via `nvidia-smi` (ships inside the driver). No monitoring agents installed — AMD/Intel temps aren't exposed by Windows without the vendor suites, and we don't bundle those on principle.
+- 📊 **Rig Command Center** — live temperature, clocks, power, fan, usage, VRAM and driver age
+  for **all vendors**, with zero monitoring agents installed. Usage/VRAM come from Windows' GPU
+  counters; temp/clock/power/fan come from Windows' WDDM telemetry — the same hidden `gdi32`
+  API Task Manager uses, fed by every modern (WDDM 2.4+) driver, NVIDIA/AMD/Intel alike. NVIDIA
+  cards get extra precision via `nvidia-smi` (ships inside the driver). Readings were calibrated
+  against `nvidia-smi` ground truth: temperature matched to the degree, clocks to the MHz.
 
 ### ⚖ One army, every banner — feature parity across vendors
 
@@ -40,7 +45,7 @@ doesn't expose without the vendors' own bloatware:
 | Sentinel auto-scout notifications | ✅ | ✅ | ✅ |
 | Radar release-notes game matching | ✅ | ✅ | ✅ |
 | Command Center: usage / VRAM / driver age | ✅ | ✅ | ✅ |
-| Command Center: temp / clocks / power / fan | ✅ via `nvidia-smi` (ships in the driver) | — Windows doesn't expose it without Adrenalin | — same, needs Intel's suite |
+| Command Center: temp / clocks / power / fan | ✅ via `nvidia-smi` (ships in the driver) | ✅ via Windows' WDDM telemetry — the same hidden API Task Manager reads | ✅ same (WDDM 2.4+ driver, Win10 1803+) |
 
 **The classics:**
 

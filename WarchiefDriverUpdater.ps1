@@ -37,7 +37,7 @@ $ErrorActionPreference = 'Stop'
 # ---------------------------------------------------------------------------
 #  Shared constants & config
 # ---------------------------------------------------------------------------
-$script:AppVersion = '2.0.1'   # single source of truth - Build.ps1 reads this to version the exe
+$script:AppVersion = '2.1.0'   # single source of truth - Build.ps1 reads this to version the exe
 $script:GitHubRepo = 'dontshome/Warchief-Driver-Updater'
 $script:UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
 $script:OsBuild  = [int](Get-CimInstance Win32_OperatingSystem).BuildNumber
@@ -600,6 +600,94 @@ function Get-NvSmiStats {
         return $rows
     } catch { return $null }
 }
+# --- WDDM telemetry: temp/clock/power/fan for ANY vendor ---------------------
+# The same hidden gdi32 API Task Manager uses (D3DKMTQueryAdapterInfo with
+# ADAPTERPERFDATA=62 / NODEPERFDATA=61). Every WDDM 2.4+ driver feeds it, so
+# AMD and Intel get real sensor readings with zero extra software. Units were
+# calibrated against nvidia-smi: Temperature is deci-Celsius, Power is tenths
+# of a percent of the card's max, frequencies are Hz, FanRPM is literal RPM.
+$script:KmtCs = @'
+using System;
+using System.Runtime.InteropServices;
+public static class WduKmt {
+    [StructLayout(LayoutKind.Sequential)] public struct LUID { public uint Low; public int High; }
+    [StructLayout(LayoutKind.Sequential)] public struct AI { public uint h; public LUID luid; public uint n; public uint b; }
+    [StructLayout(LayoutKind.Sequential)] public struct EA2 { public uint N; public IntPtr p; }
+    [StructLayout(LayoutKind.Sequential)] public struct QAI { public uint h; public uint T; public IntPtr p; public uint s; }
+    [StructLayout(LayoutKind.Sequential)] public struct PERF {
+        public uint PhysIdx; public ulong MemF, MaxMemF, MaxMemFOC, MemBW, PcieBW;
+        public uint Fan, Power, Temp; public byte Ovr;
+    }
+    [StructLayout(LayoutKind.Sequential)] public struct NODE {
+        public uint Ord; public uint PhysIdx; public ulong Freq, MaxF, MaxFOC;
+        public uint V, VMax, VMaxOC; public ulong Lat;
+    }
+    [StructLayout(LayoutKind.Sequential)] public struct CA { public uint h; }
+    [DllImport("gdi32.dll")] static extern int D3DKMTEnumAdapters2(ref EA2 e);
+    [DllImport("gdi32.dll")] static extern int D3DKMTQueryAdapterInfo(ref QAI q);
+    [DllImport("gdi32.dll")] static extern int D3DKMTCloseAdapter(ref CA c);
+    public static string[] Read() {
+        var list = new System.Collections.Generic.List<string>();
+        var e = new EA2();
+        if (D3DKMTEnumAdapters2(ref e) != 0) return list.ToArray();
+        int sz = Marshal.SizeOf(typeof(AI));
+        e.p = Marshal.AllocHGlobal(sz * (int)e.N);
+        if (D3DKMTEnumAdapters2(ref e) != 0) { Marshal.FreeHGlobal(e.p); return list.ToArray(); }
+        for (int i = 0; i < (int)e.N; i++) {
+            var ai = (AI)Marshal.PtrToStructure(IntPtr.Add(e.p, i * sz), typeof(AI));
+            ulong memHz = 0, coreHz = 0, maxCoreHz = 0; uint fan = 0, pow = 0, temp = 0;
+            int psz = Marshal.SizeOf(typeof(PERF));
+            IntPtr buf = Marshal.AllocHGlobal(psz);
+            var pd = new PERF(); Marshal.StructureToPtr(pd, buf, false);
+            var q = new QAI(); q.h = ai.h; q.T = 62; q.p = buf; q.s = (uint)psz;
+            if (D3DKMTQueryAdapterInfo(ref q) == 0) {
+                pd = (PERF)Marshal.PtrToStructure(buf, typeof(PERF));
+                memHz = pd.MemF; fan = pd.Fan; pow = pd.Power; temp = pd.Temp;
+            }
+            Marshal.FreeHGlobal(buf);
+            int nsz = Marshal.SizeOf(typeof(NODE));
+            IntPtr nb = Marshal.AllocHGlobal(nsz);
+            var nd = new NODE(); nd.Ord = 0; Marshal.StructureToPtr(nd, nb, false);
+            var nq = new QAI(); nq.h = ai.h; nq.T = 61; nq.p = nb; nq.s = (uint)nsz;
+            if (D3DKMTQueryAdapterInfo(ref nq) == 0) {
+                nd = (NODE)Marshal.PtrToStructure(nb, typeof(NODE));
+                coreHz = nd.Freq; maxCoreHz = nd.MaxF;
+            }
+            Marshal.FreeHGlobal(nb);
+            var ca = new CA(); ca.h = ai.h; D3DKMTCloseAdapter(ref ca);
+            if (temp > 0 || fan > 0 || pow > 0 || memHz > 0 || coreHz > 0) {
+                list.Add(string.Format("{0}|{1}|{2}|{3}|{4}|{5}", temp, fan, pow, memHz, coreHz, maxCoreHz));
+            }
+        }
+        Marshal.FreeHGlobal(e.p);
+        return list.ToArray();
+    }
+}
+'@
+function Get-KmtStats {
+    if ($null -eq $script:KmtReady) {
+        try { Add-Type -TypeDefinition $script:KmtCs; $script:KmtReady = $true } catch { $script:KmtReady = $false }
+    }
+    if (-not $script:KmtReady) { return @() }
+    $rows = @()
+    try {
+        foreach ($line in [WduKmt]::Read()) {
+            $p = $line -split '\|'
+            $tC = [double]$p[0] / 10
+            if ($tC -gt 200) { $tC -= 273.15 }   # defensive: some drivers report deci-Kelvin
+            $rows += [pscustomobject]@{
+                Temp = [math]::Round($tC, 0)
+                Fan  = [int]$p[1]
+                Power = [math]::Round([double]$p[2] / 10, 0)
+                MemMHz  = [math]::Round([double]$p[3] / 1e6, 0)
+                CoreMHz = [math]::Round([double]$p[4] / 1e6, 0)
+                MaxCoreMHz = [math]::Round([double]$p[5] / 1e6, 0)
+            }
+        }
+    } catch {}
+    return ,$rows
+}
+
 # Universal live stats - works for NVIDIA, AMD and Intel alike using only
 # what Windows already has: GPU perf counters (usage, VRAM in use), the
 # display-class registry (true total VRAM; WMI's AdapterRAM caps at 4 GB)
@@ -631,10 +719,14 @@ function Get-GpuLiveStats {
 
     $smi = @()
     if ($gpus | Where-Object { $_.Name -match 'NVIDIA' }) { $smi = @(Get-NvSmiStats) }
+    $kmt = @(Get-KmtStats)   # WDDM telemetry: any vendor, no extra software
+    $kmtIdx = 0
 
     $out = @()
     foreach ($g in $gpus) {
         $smiRow = $smi | Where-Object { $g.Name -like "*$($_.Name)*" -or $_.Name -like "*$($g.Name)*" } | Select-Object -First 1
+        $kd = $null
+        if (-not $smiRow -and $kmtIdx -lt $kmt.Count) { $kd = $kmt[$kmtIdx]; $kmtIdx++ }
         $age = $null; try { $age = [int]((Get-Date) - $g.DriverDate).TotalDays } catch {}
         $total = $totals[$g.Name]
         $vendor = if ($g.Name -match 'NVIDIA') { 'NVIDIA' } elseif ($g.Name -match 'AMD|Radeon') { 'AMD' } elseif ($g.Name -match 'Intel') { 'Intel' } else { '' }
@@ -648,12 +740,13 @@ function Get-GpuLiveStats {
             Name = $g.Name; Vendor = $vendor
             Util = if ($smiRow) { "$($smiRow.Util) %" } elseif ($null -ne $util) { "$util %" } else { $null }
             Vram = $vramTxt
-            Temp  = if ($smiRow) { "$($smiRow.Temp) °C" } else { $null }
-            Clock = if ($smiRow) { "$($smiRow.Clock) MHz" } else { $null }
-            Power = if ($smiRow) { "$($smiRow.Power) W" } else { $null }
-            Fan   = if ($smiRow) { "$($smiRow.Fan) %" } else { $null }
+            Temp  = if ($smiRow) { "$($smiRow.Temp) °C" } elseif ($kd -and $kd.Temp -gt 0) { "$($kd.Temp) °C" } else { $null }
+            Clock = if ($smiRow) { "$($smiRow.Clock) MHz" } elseif ($kd -and $kd.CoreMHz -gt 0) { "$($kd.CoreMHz) MHz (max $($kd.MaxCoreMHz))" } else { $null }
+            MemClock = if ($kd -and $kd.MemMHz -gt 0) { "$($kd.MemMHz) MHz" } else { $null }
+            Power = if ($smiRow) { "$($smiRow.Power) W" } elseif ($kd -and $kd.Power -gt 0) { "$($kd.Power) % of max" } else { $null }
+            Fan   = if ($smiRow) { "$($smiRow.Fan) %" } elseif ($kd) { "$($kd.Fan) RPM" } else { $null }
             DriverAge = $age
-            HasDeep = [bool]$smiRow
+            HasDeep = ([bool]$smiRow -or [bool]$kd)
         }
     }
     return ,$out
@@ -1421,7 +1514,7 @@ function Update-CommandView {
         return
     }
     foreach ($r in $rows) { [void]$StatPanel.Children.Add((New-StatCard $r)) }
-    $CmdHint.Text = 'Usage & VRAM come from Windows'' own GPU counters (all vendors). NVIDIA cards add temp/clock/power/fan via nvidia-smi, which ships inside the driver. Updates every few seconds.'
+    $CmdHint.Text = 'All readings come from Windows itself: GPU perf counters plus the same WDDM telemetry Task Manager uses (temp/clock/power/fan, any vendor with a WDDM 2.4+ driver). NVIDIA cards get extra precision via nvidia-smi. Updates every few seconds.'
 }
 function New-StatCard($r) {
     $b = New-Object Windows.Controls.Border
@@ -1437,6 +1530,7 @@ function New-StatCard($r) {
         @('🧠 VRAM',       $r.Vram),
         @('🌡 Temperature',$r.Temp),
         @('🎛 Core clock', $r.Clock),
+        @('📼 Memory clock', $r.MemClock),
         @('⚡ Power draw', $r.Power),
         @('🌀 Fan',        $r.Fan),
         @('🗓 Driver age', $ageTxt)
@@ -1453,11 +1547,11 @@ function New-StatCard($r) {
         [void]$g.Children.Add($l); [void]$g.Children.Add($v)
         [void]$sp.Children.Add($g)
     }
-    if (-not $r.HasDeep -and $r.Vendor -in 'AMD','Intel') {
+    if (-not $r.HasDeep) {
         $note = New-Object Windows.Controls.TextBlock
         $note.TextWrapping = 'Wrap'; $note.FontStyle = 'Italic'; $note.FontSize = 11.5
         $note.Foreground = $window.Resources['Dim']; $note.Margin = '0,6,0,0'
-        $note.Text = "Windows doesn't expose $($r.Vendor) temperature/clocks without the vendor's app suite — the very bloat this tool skips, so usage, VRAM and driver age are shown instead."
+        $note.Text = "This GPU's driver doesn't report sensor telemetry to Windows (needs a WDDM 2.4+ driver, Win10 1803+). Usage, VRAM and driver age are shown instead."
         [void]$sp.Children.Add($note)
     }
     $b.Child = $sp; return $b
