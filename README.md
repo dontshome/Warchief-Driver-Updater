@@ -21,6 +21,27 @@ and forges (downloads) it for you with one click — all wrapped in a dark iron-
 - 🎮 **Game Ready Radar** — reads the game library files your launchers already keep on disk (Steam manifests, Battle.net/Epic/Ubisoft/EA registrations — nothing new installed) and cross-checks them against the driver's official release notes to show which of *your* games the update tunes.
 - 📊 **Rig Command Center** — live GPU usage, VRAM, and driver age for **all vendors** via Windows' own GPU counters; NVIDIA cards add temperature, clocks, power and fan via `nvidia-smi` (ships inside the driver). No monitoring agents installed — AMD/Intel temps aren't exposed by Windows without the vendor suites, and we don't bundle those on principle.
 
+### ⚖ One army, every banner — feature parity across vendors
+
+Vendor tools only care about their own silicon. The Warchief serves **every card in your rig,
+side by side, with the same features** — and is honest about the few things Windows simply
+doesn't expose without the vendors' own bloatware:
+
+| Feature | NVIDIA | AMD (incl. Ryzen APUs) | Intel (Arc / Iris Xe / UHD) |
+|---|:---:|:---:|:---:|
+| Detect GPU + installed driver | ✅ | ✅ | ✅ |
+| Check newest driver (official sources) | ✅ | ✅ | ✅ |
+| Direct vendor-server download | ✅ | ✅ | ✅ |
+| Slim / driver-only install | ✅ | ✅ | — (Intel's package is already lean) |
+| Measured "bloat skipped" savings | ✅ | ✅ | — |
+| Game Ready / Studio toggle | ✅ | n/a | n/a |
+| War Chest rollback (re-equip old driver) | ✅ | ✅ | ✅ |
+| Restore point before install | ✅ | ✅ | ✅ |
+| Sentinel auto-scout notifications | ✅ | ✅ | ✅ |
+| Radar release-notes game matching | ✅ | ✅ | ✅ |
+| Command Center: usage / VRAM / driver age | ✅ | ✅ | ✅ |
+| Command Center: temp / clocks / power / fan | ✅ via `nvidia-smi` (ships in the driver) | — Windows doesn't expose it without Adrenalin | — same, needs Intel's suite |
+
 **The classics:**
 
 - ⚔🦁 **Pick your faction** — one click in the title bar switches between the **Horde** theme
