@@ -21,7 +21,7 @@ $ErrorActionPreference = 'Stop'
 # ---------------------------------------------------------------------------
 #  Shared constants & config
 # ---------------------------------------------------------------------------
-$script:AppVersion = '1.4.1'   # single source of truth - Build.ps1 reads this to version the exe
+$script:AppVersion = '1.4.2'   # single source of truth - Build.ps1 reads this to version the exe
 $script:GitHubRepo = 'dontshome/Warchief-Driver-Updater'
 $script:UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
 $script:OsBuild  = [int](Get-CimInstance Win32_OperatingSystem).BuildNumber
@@ -409,18 +409,25 @@ function Invoke-NvidiaSlimInstall([string]$ExePath, [string]$WorkDir, $Sync, [st
         if (Test-Path $WorkDir) { Remove-Item $WorkDir -Recurse -Force }
 
         $Sync.SlimStatus = 'Unpacking driver & stripping the bloat (can take a minute)...'
-        $bloat = @('GFExperience*', 'NvApp*', 'NVApp*', 'NvTelemetry*', 'FrameViewSDK',
-                   'Update.Core', 'NvBackend', 'ShadowPlay', 'ShieldWirelessController', 'GfeSDK*', 'nodejs')
-        $szArgs = @('x', $ExePath, "-o$WorkDir", '-y') + ($bloat | ForEach-Object { "-xr!$_" })
+        # Only strip the top-level component FOLDERS that are genuinely
+        # separable (the NVIDIA App / GeForce Experience suite). Do NOT use
+        # recursive (-xr!) name globs: modern drivers ship NvTelemetry64.dll
+        # and other bits INSIDE Display.Driver, and excluding them by name
+        # anywhere breaks the driver install (manifest "file missing" -> abort).
+        $bloat = @('GFExperience', 'GFExperience.NvStreamSrv', 'NvApp', 'NVApp', 'NvApp.MessageBus',
+                   'GfeSDK', 'ShadowPlay', 'ShieldWirelessController', 'Update.Core', 'NvBackend', 'nodejs')
+        $szArgs = @('x', $ExePath, "-o$WorkDir", '-y') + ($bloat | ForEach-Object { "-x!$_" })
         & $sz @szArgs | Out-Null
         if ($LASTEXITCODE -gt 1) { throw "7-Zip failed with exit code $LASTEXITCODE." }
         if (-not (Test-Path (Join-Path $WorkDir 'setup.exe'))) { throw 'setup.exe not found after extraction.' }
 
-        # remove manifest references to files that lived in the stripped folders
+        # remove ONLY the <file> presence-check entries for files that lived in
+        # the stripped folders. The <string> definitions must stay - other lines
+        # reference them, and the installer aborts on undefined variables.
         $cfg = Join-Path $WorkDir 'setup.cfg'
         if (Test-Path $cfg) {
             $txt = [IO.File]::ReadAllText($cfg)
-            $txt = [regex]::Replace($txt, '(?m)^.*\$\{\{(EulaHtmlFile|FunctionalConsentFile|PrivacyPolicyFile|GDPR[^}]*)\}\}.*\r?\n', '')
+            $txt = [regex]::Replace($txt, '(?m)^\s*<file name="\$\{\{(EulaHtmlFile|FunctionalConsentFile|PrivacyPolicyFile|GDPR[^}]*)\}\}"\s*/>\s*\r?\n', '')
             [IO.File]::WriteAllText($cfg, $txt)
         }
 
