@@ -36,7 +36,7 @@ $ErrorActionPreference = 'Stop'
 # ---------------------------------------------------------------------------
 #  Shared constants & config
 # ---------------------------------------------------------------------------
-$script:AppVersion = '1.5.0'   # single source of truth - Build.ps1 reads this to version the exe
+$script:AppVersion = '1.5.1'   # single source of truth - Build.ps1 reads this to version the exe
 $script:GitHubRepo = 'dontshome/Warchief-Driver-Updater'
 $script:UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
 $script:OsBuild  = [int](Get-CimInstance Win32_OperatingSystem).BuildNumber
@@ -382,6 +382,28 @@ function Get-SevenZip([string]$ToolDir) {
     return $local
 }
 
+# Sum the uncompressed bytes of every archive entry whose path contains one of
+# the given folder names - i.e. how much disk the slim install skips. Uses
+# 7-Zip's technical listing (-slt) so parsing is robust across versions.
+function Measure-SkippedBytes([string]$SevenZip, [string]$ExePath, [string[]]$Folders) {
+    try {
+        $total = 0L; $curSize = 0L; $isMatch = $false
+        foreach ($line in (& $SevenZip l -slt $ExePath)) {
+            if ($line -like 'Path = *') {
+                $p = $line.Substring(7)
+                $segs = $p -split '[\\/]'
+                $isMatch = @($segs | Where-Object { $Folders -contains $_ }).Count -gt 0
+            } elseif ($isMatch -and $line -like 'Size = *') {
+                $curSize = 0L
+                [void][long]::TryParse($line.Substring(7).Trim(), [ref]$curSize)
+                $total += $curSize
+                $isMatch = $false
+            }
+        }
+        return $total
+    } catch { return 0L }
+}
+
 # --- Slim AMD install ---------------------------------------------------------
 # AMD's installer is also an archive. Per AMD's own Command Line Installation
 # guide, "Setup.exe -INSTALL -USE <path>" silently installs only the packages
@@ -394,6 +416,9 @@ function Invoke-AmdSlimInstall([string]$ExePath, [string]$WorkDir, $Sync, [strin
         $sz = Get-SevenZip $ToolDir
 
         if (Test-Path $WorkDir) { Remove-Item $WorkDir -Recurse -Force }
+
+        $Sync.SlimStatus = 'Measuring how much bloat we can skip...'
+        $Sync.SlimSaved = Measure-SkippedBytes $sz $ExePath @('Apps')
 
         $Sync.SlimStatus = 'Unpacking AMD package without the Adrenalin app (takes a few minutes)...'
         & $sz x $ExePath "-o$WorkDir" '-y' '-xr!Apps' | Out-Null
@@ -431,6 +456,7 @@ function Invoke-NvidiaSlimInstall([string]$ExePath, [string]$WorkDir, $Sync, [st
         # anywhere breaks the driver install (manifest "file missing" -> abort).
         $bloat = @('GFExperience', 'GFExperience.NvStreamSrv', 'NvApp', 'NVApp', 'NvApp.MessageBus',
                    'GfeSDK', 'ShadowPlay', 'ShieldWirelessController', 'Update.Core', 'NvBackend', 'nodejs')
+        $Sync.SlimSaved = Measure-SkippedBytes $sz $ExePath $bloat
         $szArgs = @('x', $ExePath, "-o$WorkDir", '-y') + ($bloat | ForEach-Object { "-x!$_" })
         & $sz @szArgs | Out-Null
         if ($LASTEXITCODE -gt 1) { throw "7-Zip failed with exit code $LASTEXITCODE." }
@@ -710,8 +736,24 @@ $mainXaml = @'
           <Button x:Name="BtnRefresh" DockPanel.Dock="Right" Content="🐺 SCOUT AGAIN" Margin="10,0,0,0"/>
           <CheckBox x:Name="ChkStudio" DockPanel.Dock="Right" Content="Studio driver" Margin="10,0,0,0"
                     ToolTip="NVIDIA only: fetch the Studio driver (for creative apps) instead of Game Ready"/>
-          <CheckBox x:Name="ChkSlim" DockPanel.Dock="Right" Content="Slim install (no vendor apps)" Margin="10,0,0,0"
-                    ToolTip="Driver-only install: strips the NVIDIA App / GeForce Experience or AMD Adrenalin software"/>
+          <CheckBox x:Name="ChkSlim" DockPanel.Dock="Right" Content="Slim install (no vendor apps)" Margin="10,0,0,0">
+            <CheckBox.ToolTip>
+              <ToolTip>
+                <StackPanel MaxWidth="340">
+                  <TextBlock FontWeight="Bold" Text="Driver-only install — skips the vendor app suite"/>
+                  <TextBlock TextWrapping="Wrap" Margin="0,4,0,0"
+                    Text="Installs ONLY the display driver + control panel, leaving out the NVIDIA App / GeForce Experience (or AMD Adrenalin) software."/>
+                  <TextBlock FontWeight="Bold" Margin="0,6,0,0" Text="Why it helps:"/>
+                  <TextBlock TextWrapping="Wrap" Text="• Saves disk space — often 500 MB to 1 GB+"/>
+                  <TextBlock TextWrapping="Wrap" Text="• No background telemetry or account login"/>
+                  <TextBlock TextWrapping="Wrap" Text="• Fewer auto-start services = less RAM, faster boot"/>
+                  <TextBlock TextWrapping="Wrap" Text="• You still get the full driver and NVIDIA/AMD Control Panel"/>
+                  <TextBlock TextWrapping="Wrap" FontStyle="Italic" Margin="0,6,0,0"
+                    Text="The exact amount saved is shown after install. Untick for the vendor's normal installer."/>
+                </StackPanel>
+              </ToolTip>
+            </CheckBox.ToolTip>
+          </CheckBox>
           <TextBlock x:Name="StatusBar" Text="Scouting the battlefield for war machines..."
                      Foreground="{DynamicResource Parchment}" FontSize="13" VerticalAlignment="Center"/>
         </DockPanel>
@@ -966,6 +1008,7 @@ function Invoke-ActionButton([int]$idx) {
                 $script:Sync.SlimDone   = $false
                 $script:Sync.SlimError  = $null
                 $script:Sync.SlimExit   = $null
+                $script:Sync.SlimSaved  = 0L
                 $script:Sync.SlimStatus = 'Preparing the smithy...'
                 $script:Sync.SlimExe    = $c.FilePath
                 $script:Sync.SlimTools  = $script:ConfigDir
@@ -1257,13 +1300,15 @@ $timer.Add_Tick({
                         elseif ($code -eq 3) { $ok = $true; $reboot = $true }
                     }
                     if ($ok) {
+                        $saved = [long]$script:Sync.SlimSaved
+                        $savedTxt = if ($saved -gt 0) { Format-Bytes $saved } else { $null }
                         $c.Bar.Value = 100
-                        $c.DlInfo.Text = 'Victory!'
-                        $c.StatusText.Text = "⚔ NEW WAR GEAR EQUIPPED! Driver installed$(if ($reboot) { ' — reboot to seal the deal' })."
+                        $c.DlInfo.Text = if ($savedTxt) { "Skipped $savedTxt of vendor apps." } else { 'Victory!' }
+                        $c.StatusText.Text = "⚔ NEW WAR GEAR EQUIPPED!$(if ($savedTxt) { " Trimmed $savedTxt of bloat." } else { ' Driver installed.' })$(if ($reboot) { ' Reboot to seal the deal.' })"
                         $c.StatusText.Foreground = $script:ColGood
-                        $StatusBar.Text = 'Driver installed without the vendor bloat. The forge burns clean!'
+                        $StatusBar.Text = if ($savedTxt) { "Driver installed — $savedTxt of vendor apps skipped. The forge burns clean!" } else { 'Driver installed without the vendor bloat. The forge burns clean!' }
                         [void][Windows.MessageBox]::Show(
-                            "$($c.Gpu.Name)`n`nNew war gear equipped — the driver was installed without the vendor's extra apps.$(if ($reboot) { "`n`nA reboot is required to finish." })`n`nVictory, champion!",
+                            "$($c.Gpu.Name)`n`nNew war gear equipped — the driver was installed without the vendor's extra apps.$(if ($savedTxt) { "`n`nSlim install skipped about $savedTxt of NVIDIA App / GeForce Experience / vendor software — less disk used, no background telemetry, fewer auto-start processes." })$(if ($reboot) { "`n`nA reboot is required to finish." })`n`nVictory, champion!",
                             'Warchief Driver Updater', 'OK', 'Information')
                     } else {
                         $c.Bar.Visibility = 'Collapsed'; $c.DlInfo.Visibility = 'Collapsed'
