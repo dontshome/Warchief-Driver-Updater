@@ -41,7 +41,7 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::S
 # ---------------------------------------------------------------------------
 #  Shared constants & config
 # ---------------------------------------------------------------------------
-$script:AppVersion = '2.2.0'   # single source of truth - Build.ps1 reads this to version the exe
+$script:AppVersion = '2.3.0'   # single source of truth - Build.ps1 reads this to version the exe
 $script:GitHubRepo = 'dontshome/Warchief-Driver-Updater'
 $script:UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
 $script:OsBuild  = [int](Get-CimInstance Win32_OperatingSystem).BuildNumber
@@ -277,6 +277,21 @@ function Get-AmdLatest([string]$GpuName, [string]$OsTag, [bool]$LegacyOs = $fals
         return @{ Error = 'Could not map this AMD GPU to a driver page. Use the AMD site button.'; Notes = $manualUrl }
     }
 
+    # pre-RX GCN cards (R9/R7/R5 200-300 series, Fury, HD 7700-8xxx) ended on
+    # the frozen 22.6.1 branch - its release-notes page still serves the installer
+    if ($GpuName -match '(?i)\b(R9|R7|R5)\s?M?\d|Fury|HD\s?7[7-9]\d\d|HD\s?8\d{3}') {
+        $rn = 'https://www.amd.com/en/resources/support-articles/release-notes/RN-RAD-WIN-22-6-1.html'
+        try {
+            $html = Get-Web $rn
+            $m2 = [regex]::Match($html, '(https://drivers\.amd\.com/drivers/[^"''\s<>]+\.exe)')
+            if ($m2.Success) {
+                return @{ Version = '22.6.1'; Url = $m2.Groups[1].Value; Notes = $rn; Referer = 'https://www.amd.com/'
+                          Title = 'AMD Software 22.6.1 - the final driver branch for pre-RX Radeons' }
+            }
+        } catch {}
+        return @{ Error = 'This Radeon generation ended on the 22.6.1 legacy branch, but its page could not be reached right now. Use the AMD site button.'; Notes = $manualUrl }
+    }
+
     $candidates = @()
     $m = [regex]::Match($GpuName, '(?i)RX\s*(\d{3,4})\s*(XTX|XT|GRE|M|S)?')
     if ($m.Success) {
@@ -337,8 +352,28 @@ function Get-IntelLatest([string]$GpuName, [bool]$LegacyOs = $false) {
         return @{ Error = 'Intel no longer makes new Windows 7/8.1 graphics drivers; the final one depends on your chip generation. Use the Intel site button.'
                   Notes = 'https://www.intel.com/content/www/us/en/support/detect.html' }
     }
+    # 7th-10th gen chips (HD/UHD Graphics 6xx) ended on the frozen 31.0.101.21xx
+    # branch - the unified Arc/Iris Xe driver refuses to install on them
+    if ($GpuName -match '(?i)\bU?HD Graphics 6\d\d\b') {
+        $legacyPage = 'https://www.intel.com/content/www/us/en/download/776137/intel-7th-10th-gen-processor-graphics-windows.html'
+        $pages = @($legacyPage, 'https://www.intel.cn/content/www/cn/zh/download/776137/intel-7th-10th-gen-processor-graphics-windows.html')
+        foreach ($url in $pages) {
+            try { $html = Get-Web $url } catch { continue }
+            $dl = [regex]::Match($html, '(https://downloadmirror\.intel\.com/[^"''\s<>]+\.exe)')
+            if (-not $dl.Success) { continue }
+            $ver = [regex]::Match($html, '(31\.0\.101\.\d+)')
+            return @{
+                Version = $(if ($ver.Success) { $ver.Groups[1].Value } else { '' })
+                Url     = $dl.Groups[1].Value
+                Notes   = $legacyPage
+                Title   = 'Intel 7th-10th Gen Graphics - final legacy branch'
+            }
+        }
+        return @{ Error = 'Intel legacy driver page not reachable right now. Use the Intel site button.'; Notes = $legacyPage }
+    }
+
     if ($GpuName -notmatch '(?i)Arc|Iris|UHD') {
-        return @{ Error = 'Legacy Intel graphics use per-generation drivers. Use the Intel site button.'
+        return @{ Error = 'This Intel graphics generation predates the legacy branches this app can serve. Use the Intel site button.'
                   Notes = 'https://www.intel.com/content/www/us/en/support/detect.html' }
     }
     $pages = @(
@@ -899,7 +934,9 @@ if ($SelfTest) {
         @{ Label = 'AMD Radeon RX 7900 XTX (dGPU)';   Run = { Get-AmdLatest 'AMD Radeon RX 7900 XTX' $script:AmdOsTag $script:LegacyOs } },
         @{ Label = 'AMD Radeon(TM) Graphics (APU)';    Run = { Get-AmdLatest 'AMD Radeon(TM) Graphics' $script:AmdOsTag $script:LegacyOs } },
         @{ Label = 'Intel Arc A770';                   Run = { Get-IntelLatest 'Intel(R) Arc(TM) A770 Graphics' $script:LegacyOs } },
-        @{ Label = 'NVIDIA RTX 3060 (Studio driver)';  Run = { Get-NvidiaLatest 'NVIDIA GeForce RTX 3060' $script:NvOsId $true $script:NvDch } }
+        @{ Label = 'NVIDIA RTX 3060 (Studio driver)';  Run = { Get-NvidiaLatest 'NVIDIA GeForce RTX 3060' $script:NvOsId $true $script:NvDch } },
+        @{ Label = 'AMD Radeon R9 390 (pre-RX legacy)'; Run = { Get-AmdLatest 'AMD Radeon (TM) R9 390 Series' $script:AmdOsTag $script:LegacyOs } },
+        @{ Label = 'Intel HD Graphics 630 (7th gen legacy)'; Run = { Get-IntelLatest 'Intel(R) HD Graphics 630' $script:LegacyOs } }
     )
     foreach ($s in $samples) {
         Write-Host "`n[sample] $($s.Label)" -ForegroundColor Cyan

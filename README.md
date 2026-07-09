@@ -185,9 +185,11 @@ for your OS* — it never lies about a current driver being available when the v
 
 ## Known limits
 
-- Very old hardware uses legacy driver branches the unified packages don't cover: pre-RX
-  Radeons and pre-11th-gen Intel HD Graphics get an **OPEN VENDOR SITE** button instead of an
-  auto-match. Same graceful fallback if a vendor page is ever unreachable.
+- Retired hardware auto-matches to its vendor's frozen final branch: pre-RX Radeons (R9/R7/R5,
+  Fury, HD 7700+) get AMD Software 22.6.1, and Intel HD/UHD 6xx (7th–10th gen) gets the
+  31.0.101.21xx legacy driver. Only *truly* ancient GPUs — pre-2012 Radeon HD 5000/6000 and
+  pre-7th-gen Intel — predate those branches and get an **OPEN VENDOR SITE** button instead.
+  The same graceful button appears if a vendor page is ever unreachable.
 - Intel installs use Intel's stock installer (their package is already light on bloat, so
   there's no slim mode for it).
 
