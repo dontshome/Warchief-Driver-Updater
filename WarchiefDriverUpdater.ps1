@@ -27,8 +27,9 @@
     <https://www.gnu.org/licenses/>.
 #>
 param(
-    [switch]$SelfTest,  # run headless diagnostics (no GUI) and exit
-    [switch]$Scout      # headless: check for new drivers, toast if found, exit (used by the Sentinel scheduled task)
+    [switch]$SelfTest,      # run headless diagnostics (no GUI) and exit
+    [switch]$Scout,         # headless: check for new drivers, toast if found, exit (used by the Sentinel scheduled task)
+    [int]$SimulateBuild = 0 # testing aid: pretend to be another Windows build (e.g. 7601 = Win7 SP1)
 )
 
 $ErrorActionPreference = 'Stop'
@@ -40,12 +41,22 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::S
 # ---------------------------------------------------------------------------
 #  Shared constants & config
 # ---------------------------------------------------------------------------
-$script:AppVersion = '2.1.0'   # single source of truth - Build.ps1 reads this to version the exe
+$script:AppVersion = '2.2.0'   # single source of truth - Build.ps1 reads this to version the exe
 $script:GitHubRepo = 'dontshome/Warchief-Driver-Updater'
 $script:UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
 $script:OsBuild  = [int](Get-CimInstance Win32_OperatingSystem).BuildNumber
-$script:NvOsId   = if ($script:OsBuild -ge 22000) { 135 } else { 57 }   # 135 = Win11, 57 = Win10 x64
+if ($SimulateBuild -gt 0) { $script:OsBuild = $SimulateBuild }
+# NVIDIA 64-bit OS ids: Win11=135, Win10=57, Win8.1=41, Win8=28, Win7=19.
+# DCH driver packages only install on Win10 1803 (build 17134) and newer.
+$script:NvOsId = if ($script:OsBuild -ge 22000) { 135 }
+                 elseif ($script:OsBuild -ge 10240) { 57 }
+                 elseif ($script:OsBuild -ge 9600)  { 41 }
+                 elseif ($script:OsBuild -ge 9200)  { 28 }
+                 else { 19 }
+$script:NvDch    = if ($script:OsBuild -ge 17134) { 1 } else { 0 }
+$script:LegacyOs = $script:OsBuild -lt 10240   # Windows 8.1 / 8 / 7
 $script:AmdOsTag = if ($script:OsBuild -ge 22000) { 'win11' } else { 'win10' }
+$script:Is64Bit  = [Environment]::Is64BitOperatingSystem
 
 $script:ConfigDir  = Join-Path $env:APPDATA 'WarchiefDriverUpdater'
 $script:ConfigPath = Join-Path $script:ConfigDir 'config.json'
@@ -218,7 +229,7 @@ function Get-LatestReleaseInfo([string]$Repo) {
 # 2) query the AjaxDriverService for the newest Game Ready (or Studio) driver
 #    Studio drivers need upCRD=1&isWHQL=0 (they are WHQL-certified, but the
 #    API only returns them with that combination).
-function Get-NvidiaLatest([string]$GpuName, [int]$OsId, [bool]$Studio = $false) {
+function Get-NvidiaLatest([string]$GpuName, [int]$OsId, [bool]$Studio = $false, [int]$Dch = 1) {
     $xmlText = Get-Web 'https://www.nvidia.com/Download/API/lookupValueSearch.aspx?TypeID=3'
     [xml]$xml = $xmlText
     $entries  = $xml.LookupValueSearch.LookupValues.LookupValue
@@ -235,7 +246,7 @@ function Get-NvidiaLatest([string]$GpuName, [int]$OsId, [bool]$Studio = $false) 
     $flavor = if ($Studio) { 'upCRD=1&isWHQL=0' } else { 'upCRD=0&isWHQL=1' }
     $api  = "https://gfwsl.geforce.com/services_toolkit/services/com/nvidia/services/AjaxDriverService.php" +
             "?func=DriverManualLookup&psid=$psid&pfid=$pfid&osID=$OsId&languageCode=1033" +
-            "&beta=0&dltype=-1&dch=1&qnf=0&sort1=0&numberOfResults=1&$flavor"
+            "&beta=0&dltype=-1&dch=$Dch&qnf=0&sort1=0&numberOfResults=1&$flavor"
     $json = (Get-Web $api) | ConvertFrom-Json
     if ($json.Success -ne '1' -or -not $json.IDS) { return @{ Error = 'NVIDIA returned no driver for this GPU/OS.' } }
 
@@ -254,8 +265,14 @@ function Get-NvidiaLatest([string]$GpuName, [int]$OsId, [bool]$Studio = $false) 
 # AMD's per-product driver pages are server-rendered and contain direct
 # drivers.amd.com installer links. We derive candidate page URLs from the
 # GPU name and scrape the first one that answers.
-function Get-AmdLatest([string]$GpuName, [string]$OsTag) {
+function Get-AmdLatest([string]$GpuName, [string]$OsTag, [bool]$LegacyOs = $false) {
     $manualUrl = 'https://www.amd.com/en/support/download/drivers.html'
+    if ($LegacyOs) {
+        # AMD ended Windows 7/8.1 driver development in 2021-22 and the correct
+        # final driver depends on the GPU generation - guide, don't guess
+        return @{ Error = 'AMD no longer makes new Windows 7/8.1 drivers; the right final driver depends on your GPU generation. Use the AMD site button to get it.'
+                  Notes = $manualUrl }
+    }
     if ($GpuName -notmatch '(?i)Radeon') {
         return @{ Error = 'Could not map this AMD GPU to a driver page. Use the AMD site button.'; Notes = $manualUrl }
     }
@@ -314,8 +331,12 @@ function Get-AmdLatest([string]$GpuName, [string]$OsTag) {
 # Intel ships one unified driver for Arc / Iris Xe / UHD (11th gen+). The US
 # download page sits behind bot protection, but intel.cn serves the identical
 # page server-rendered, including the direct downloadmirror.intel.com link.
-function Get-IntelLatest([string]$GpuName) {
+function Get-IntelLatest([string]$GpuName, [bool]$LegacyOs = $false) {
     $notesUrl = 'https://www.intel.com/content/www/us/en/download/785597/intel-arc-iris-xe-graphics-windows.html'
+    if ($LegacyOs) {
+        return @{ Error = 'Intel no longer makes new Windows 7/8.1 graphics drivers; the final one depends on your chip generation. Use the Intel site button.'
+                  Notes = 'https://www.intel.com/content/www/us/en/support/detect.html' }
+    }
     if ($GpuName -notmatch '(?i)Arc|Iris|UHD') {
         return @{ Error = 'Legacy Intel graphics use per-generation drivers. Use the Intel site button.'
                   Notes = 'https://www.intel.com/content/www/us/en/support/detect.html' }
@@ -762,26 +783,45 @@ function Get-GpuLiveStats {
 function Set-SentinelTask([bool]$Enabled, [string]$Freq) {
     $name = 'WarchiefDriverSentinel'
     try {
-        if (-not $Enabled) {
-            Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue
-            return $true
-        }
         $exe = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
         if ($exe -match 'powershell|pwsh') {
             $inst = Join-Path $env:LOCALAPPDATA 'Programs\Warchief Driver Updater\WarchiefDriverUpdater.exe'
             if (Test-Path $inst) { $exe = $inst }
         }
-        $action   = New-ScheduledTaskAction -Execute $exe -Argument '-Scout'
-        $at       = [datetime]::Today.AddHours(12)
-        $trigger  = if ($Freq -eq 'Weekly') { New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday -At $at }
-                    else                     { New-ScheduledTaskTrigger -Daily -At $at }
-        $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-        Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
-        return $true
+        if (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue) {
+            if (-not $Enabled) {
+                Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue
+                return $true
+            }
+            $action   = New-ScheduledTaskAction -Execute $exe -Argument '-Scout'
+            $at       = [datetime]::Today.AddHours(12)
+            $trigger  = if ($Freq -eq 'Weekly') { New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday -At $at }
+                        else                     { New-ScheduledTaskTrigger -Daily -At $at }
+            $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+            Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
+            return $true
+        }
+        # Windows 7 has no ScheduledTasks module - fall back to schtasks.exe.
+        # Quoting matters: /TR needs escaped inner quotes around the exe path,
+        # so pass ONE pre-composed argument string (verified syntax).
+        if (-not $Enabled) {
+            Start-Process schtasks.exe -ArgumentList "/Delete /TN $name /F" -Wait -PassThru -WindowStyle Hidden | Out-Null
+            return $true
+        }
+        $sched = if ($Freq -eq 'Weekly') { '/SC WEEKLY /D MON' } else { '/SC DAILY' }
+        $p = Start-Process schtasks.exe -Wait -PassThru -WindowStyle Hidden `
+             -ArgumentList "/Create /TN $name /TR `"\`"$exe\`" -Scout`" $sched /ST 12:00 /F"
+        return ($p.ExitCode -eq 0)
     } catch { return $false }
 }
 function Test-SentinelTask {
-    try { return [bool](Get-ScheduledTask -TaskName 'WarchiefDriverSentinel' -ErrorAction SilentlyContinue) } catch { return $false }
+    try {
+        if (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue) {
+            return [bool](Get-ScheduledTask -TaskName 'WarchiefDriverSentinel' -ErrorAction SilentlyContinue)
+        }
+        $p = Start-Process schtasks.exe -ArgumentList '/Query /TN WarchiefDriverSentinel' -Wait -PassThru -WindowStyle Hidden
+        return ($p.ExitCode -eq 0)
+    } catch { return $false }
 }
 
 # --- Toast notification (tray balloon) ---------------------------------------
@@ -810,9 +850,9 @@ if ($Scout) {
     $updates = @()
     foreach ($g in $gpus) {
         try {
-            $r = if ($g.Vendor -eq 'NVIDIA') { Get-NvidiaLatest $g.Name $script:NvOsId ([bool]$script:Config.NvidiaStudio) }
-                 elseif ($g.Vendor -eq 'Intel') { Get-IntelLatest $g.Name }
-                 else { Get-AmdLatest $g.Name $script:AmdOsTag }
+            $r = if ($g.Vendor -eq 'NVIDIA') { Get-NvidiaLatest $g.Name $script:NvOsId ([bool]$script:Config.NvidiaStudio) $script:NvDch }
+                 elseif ($g.Vendor -eq 'Intel') { Get-IntelLatest $g.Name $script:LegacyOs }
+                 else { Get-AmdLatest $g.Name $script:AmdOsTag $script:LegacyOs }
             if (-not $r.Error -and $r.Version) {
                 $newer = $false; try { $newer = [version]$r.Version -gt [version]$g.Installed } catch {}
                 if ($newer) { $updates += "$($g.Vendor) $($g.Name): v$($r.Version)" }
@@ -843,9 +883,9 @@ if ($SelfTest) {
     foreach ($g in $gpus) {
         Write-Host "`n[$($g.Vendor)] $($g.Name)  (installed: $($g.Installed))" -ForegroundColor Cyan
         try {
-            $r = if ($g.Vendor -eq 'NVIDIA') { Get-NvidiaLatest $g.Name $script:NvOsId $false }
-                 elseif ($g.Vendor -eq 'AMD') { Get-AmdLatest $g.Name $script:AmdOsTag }
-                 else { Get-IntelLatest $g.Name }
+            $r = if ($g.Vendor -eq 'NVIDIA') { Get-NvidiaLatest $g.Name $script:NvOsId $false $script:NvDch }
+                 elseif ($g.Vendor -eq 'AMD') { Get-AmdLatest $g.Name $script:AmdOsTag $script:LegacyOs }
+                 else { Get-IntelLatest $g.Name $script:LegacyOs }
             if ($r.Error) { Write-Host "  ERROR: $($r.Error)" -ForegroundColor Red }
             else {
                 Write-Host "  Latest : $($r.Version)  $(if($r.Date){"($($r.Date))"})"
@@ -856,10 +896,10 @@ if ($SelfTest) {
     }
     # sample lookups so every vendor path is exercised regardless of this rig
     $samples = @(
-        @{ Label = 'AMD Radeon RX 7900 XTX (dGPU)';   Run = { Get-AmdLatest 'AMD Radeon RX 7900 XTX' $script:AmdOsTag } },
-        @{ Label = 'AMD Radeon(TM) Graphics (APU)';    Run = { Get-AmdLatest 'AMD Radeon(TM) Graphics' $script:AmdOsTag } },
-        @{ Label = 'Intel Arc A770';                   Run = { Get-IntelLatest 'Intel(R) Arc(TM) A770 Graphics' } },
-        @{ Label = 'NVIDIA RTX 3060 (Studio driver)';  Run = { Get-NvidiaLatest 'NVIDIA GeForce RTX 3060' $script:NvOsId $true } }
+        @{ Label = 'AMD Radeon RX 7900 XTX (dGPU)';   Run = { Get-AmdLatest 'AMD Radeon RX 7900 XTX' $script:AmdOsTag $script:LegacyOs } },
+        @{ Label = 'AMD Radeon(TM) Graphics (APU)';    Run = { Get-AmdLatest 'AMD Radeon(TM) Graphics' $script:AmdOsTag $script:LegacyOs } },
+        @{ Label = 'Intel Arc A770';                   Run = { Get-IntelLatest 'Intel(R) Arc(TM) A770 Graphics' $script:LegacyOs } },
+        @{ Label = 'NVIDIA RTX 3060 (Studio driver)';  Run = { Get-NvidiaLatest 'NVIDIA GeForce RTX 3060' $script:NvOsId $true $script:NvDch } }
     )
     foreach ($s in $samples) {
         Write-Host "`n[sample] $($s.Label)" -ForegroundColor Cyan
@@ -1595,6 +1635,15 @@ function Update-SentinelStatus {
 }
 
 Set-Theme $script:Config.Theme
+
+# legacy Windows: no Studio drivers, and be upfront about what "latest" means
+if ($script:LegacyOs) {
+    $ChkStudio.Visibility = 'Collapsed'
+    $StatusBar.Text = "Legacy Windows detected (build $script:OsBuild) — serving the vendors' final drivers for this OS. Lok'tar, old soldier!"
+}
+if (-not $script:Is64Bit) {
+    $StatusBar.Text = '32-bit Windows: GPU vendors no longer ship 32-bit drivers — driver lookups will likely come up empty.'
+}
 Show-View 'Armory'
 
 # ---------------------------------------------------------------------------
@@ -1829,7 +1878,9 @@ function Start-Scan {
 
     $script:Sync.Gpus     = @($gpus | ForEach-Object { @{ Index = $_.Index; Name = $_.Name; Vendor = $_.Vendor } })
     $script:Sync.NvOs     = $script:NvOsId
+    $script:Sync.NvDch    = $script:NvDch
     $script:Sync.AmdOs    = $script:AmdOsTag
+    $script:Sync.LegacyOs = $script:LegacyOs
     $script:Sync.NvStudio = [bool]$ChkStudio.IsChecked
     foreach ($g in $gpus) { $script:Sync.Remove("result$($g.Index)") }
 
@@ -1837,9 +1888,9 @@ function Start-Scan {
 foreach ($g in $sync.Gpus) {
     $r = $null
     try {
-        if     ($g.Vendor -eq 'NVIDIA') { $r = Get-NvidiaLatest $g.Name $sync.NvOs $sync.NvStudio }
-        elseif ($g.Vendor -eq 'Intel')  { $r = Get-IntelLatest $g.Name }
-        else                            { $r = Get-AmdLatest $g.Name $sync.AmdOs }
+        if     ($g.Vendor -eq 'NVIDIA') { $r = Get-NvidiaLatest $g.Name $sync.NvOs $sync.NvStudio $sync.NvDch }
+        elseif ($g.Vendor -eq 'Intel')  { $r = Get-IntelLatest $g.Name $sync.LegacyOs }
+        else                            { $r = Get-AmdLatest $g.Name $sync.AmdOs $sync.LegacyOs }
     } catch { $r = @{ Error = $_.Exception.Message } }
     $sync["result$($g.Index)"] = $r
 }

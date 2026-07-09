@@ -170,6 +170,19 @@ It prints detected GPUs, installed versions, and the latest driver + download UR
 Installed versions come from `Win32_VideoController` (NVIDIA's friendly version is decoded from
 the WMI version string) and, for AMD, the `RadeonSoftwareVersion` registry value.
 
+## Windows compatibility
+
+| Windows | Support |
+|---|---|
+| Windows 11 / Windows 10 1803+ (64-bit) | ✅ Everything works, full telemetry |
+| Windows 10 1507–1709 | ✅ Works — NVIDIA lookups automatically switch to standard (non-DCH) packages; live telemetry/usage rows appear only where that build supports them |
+| Windows 8.1 / 8 (64-bit) | 🟡 Legacy mode — NVIDIA still resolves automatically (their final 475.xx security-update branch); AMD/Intel stopped making drivers for it, so those cards get a guided button to the vendor's legacy page |
+| Windows 7 SP1 (64-bit) | 🟡 Same as 8.1. Requires [WMF 5.1](https://www.microsoft.com/en-us/download/details.aspx?id=54616) (PowerShell 5.1) and .NET Framework 4.5.2+. The Sentinel schedules via classic `schtasks` |
+| 32-bit Windows | ❌ GPU vendors no longer ship 32-bit drivers at all |
+
+On legacy Windows the app tells you so in the status bar and serves the newest driver *that exists
+for your OS* — it never lies about a current driver being available when the vendor has moved on.
+
 ## Known limits
 
 - Very old hardware uses legacy driver branches the unified packages don't cover: pre-RX
