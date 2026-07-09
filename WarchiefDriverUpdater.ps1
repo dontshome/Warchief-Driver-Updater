@@ -9,7 +9,22 @@
     display driver WITHOUT the NVIDIA App / GeForce Experience / telemetry.
 
     Unofficial fan project. Not affiliated with Blizzard, NVIDIA or AMD.
-    License: MIT
+
+    Copyright (C) 2026 dontshome  <https://github.com/dontshome/Warchief-Driver-Updater>
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program (see the LICENSE file).  If not, see
+    <https://www.gnu.org/licenses/>.
 #>
 param(
     [switch]$SelfTest   # run headless diagnostics (no GUI) and exit
@@ -21,7 +36,7 @@ $ErrorActionPreference = 'Stop'
 # ---------------------------------------------------------------------------
 #  Shared constants & config
 # ---------------------------------------------------------------------------
-$script:AppVersion = '1.4.2'   # single source of truth - Build.ps1 reads this to version the exe
+$script:AppVersion = '1.5.0'   # single source of truth - Build.ps1 reads this to version the exe
 $script:GitHubRepo = 'dontshome/Warchief-Driver-Updater'
 $script:UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
 $script:OsBuild  = [int](Get-CimInstance Win32_OperatingSystem).BuildNumber
@@ -671,6 +686,7 @@ $mainXaml = @'
           <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button x:Name="BtnUpdate" Content="⚡ UPDATE AVAILABLE" FontSize="11" Padding="10,4" Margin="0,0,8,0" Visibility="Collapsed"/>
             <Button x:Name="BtnFaction" Content="🦁 ALLIANCE" FontSize="11" Padding="10,4" Margin="0"/>
+            <Button x:Name="BtnAbout" Content="ⓘ" Width="30" Padding="0,4" Margin="8,0,0,0" ToolTip="About &amp; license"/>
             <Button x:Name="BtnMin"   Content="—" Width="38" Padding="0,4" Margin="0"/>
             <Button x:Name="BtnClose" Content="✕" Width="38" Padding="0,4" Margin="0"/>
           </StackPanel>
@@ -748,13 +764,28 @@ $cardXaml = @'
 '@
 
 $window = [Windows.Markup.XamlReader]::Parse($mainXaml)
-foreach ($n in 'TitleBar','TitleBarText','BannerTitle','BannerTagline','BtnUpdate','BtnFaction','BtnMin','BtnClose','BtnRefresh','ChkSlim','ChkStudio','StatusBar','CardPanel') {
+foreach ($n in 'TitleBar','TitleBarText','BannerTitle','BannerTagline','BtnUpdate','BtnFaction','BtnAbout','BtnMin','BtnClose','BtnRefresh','ChkSlim','ChkStudio','StatusBar','CardPanel') {
     Set-Variable -Name $n -Value $window.FindName($n)
 }
 
 $TitleBar.Add_MouseLeftButtonDown({ $window.DragMove() })
 $BtnMin.Add_Click({ $window.WindowState = 'Minimized' })
 $BtnClose.Add_Click({ $window.Close() })
+
+# GPL "Appropriate Legal Notices": copyright + no-warranty + license link
+$BtnAbout.Add_Click({
+    $msg = "Warchief Driver Updater  v$script:AppVersion`n`n" +
+           "Copyright (C) 2026 dontshome`n`n" +
+           "This program comes with ABSOLUTELY NO WARRANTY.`n" +
+           "It is free software, and you are welcome to redistribute it under " +
+           "the terms of the GNU General Public License v3 or later.`n`n" +
+           "If you reuse this code, the GPL requires your project to remain " +
+           "open source and to credit this original work.`n`n" +
+           "Source & license:`nhttps://github.com/$script:GitHubRepo`n`n" +
+           "Open the project page now?"
+    $r = [Windows.MessageBox]::Show($msg, 'About Warchief Driver Updater', 'YesNo', 'Information')
+    if ($r -eq 'Yes') { Start-Process "https://github.com/$script:GitHubRepo" }
+})
 
 # ---------------------------------------------------------------------------
 #  Theming

@@ -147,6 +147,19 @@ the WMI version string) and, for AMD, the `RadeonSoftwareVersion` registry value
 
 Issues and pull requests are welcome. Keep it dependency-free, keep it Horde. 🩸
 
-## License
+## License & credit
 
-[MIT](LICENSE)
+Copyright © 2026 **[dontshome](https://github.com/dontshome)**. Licensed under the
+**[GNU General Public License v3.0](LICENSE)** (or later).
+
+This is **copyleft** open source — you're free to use, study, share, and modify it, but:
+
+- ✅ **You must credit this original project** — keep the copyright notice and a link back to
+  [this repository](https://github.com/dontshome/Warchief-Driver-Updater).
+- ✅ **If you distribute a modified version, it must also be open source** under the GPL, so the
+  whole community keeps benefiting.
+- ✅ **State your changes** so bugs in forks aren't blamed on the original.
+
+In short: build on it, improve it, share it — just keep it open and give credit where it's due.
+See the [LICENSE](LICENSE) file for the full legal terms, and click the **ⓘ** button in the app
+for the in-program notice.

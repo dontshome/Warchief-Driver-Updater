@@ -7,6 +7,9 @@
     Requires the ps2exe module (auto-installed to CurrentUser if missing).
 
     Usage:  powershell -ExecutionPolicy Bypass -File .\Build.ps1
+
+    Copyright (C) 2026 dontshome. GNU GPL v3 or later; see the LICENSE file.
+    This program comes with ABSOLUTELY NO WARRANTY.
 #>
 param(
     [switch]$SkipInstaller,
