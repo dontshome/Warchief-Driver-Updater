@@ -32,7 +32,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+# Tls13 only exists on .NET Framework 4.8+; referencing it on older frameworks
+# throws at startup, so add it opportunistically after locking in Tls12
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls13 } catch {}
 
 # ---------------------------------------------------------------------------
 #  Shared constants & config
@@ -696,6 +699,9 @@ function Get-GpuLiveStats {
     $gpus = @(Get-CimInstance Win32_VideoController |
               Where-Object { $_.Name -and $_.Name -notmatch 'Microsoft|Virtual|Remote|Parsec|DisplayLink' })
 
+    # note: counter PATHS are localized on non-English Windows; if these two
+    # lookups fail there, usage/VRAM-in-use rows are simply omitted (the WDDM
+    # telemetry below still provides temp/clocks/power/fan)
     $util = $null; $vramUsed = $null
     try {
         $s = (Get-Counter '\GPU Engine(*engtype_3D)\Utilization Percentage' -ErrorAction Stop).CounterSamples
@@ -1411,7 +1417,7 @@ function Update-WarChestView {
     $rps = @(Get-AppRestorePoints)
     if (-not $rps.Count) {
         $t = New-Object Windows.Controls.TextBlock
-        $t.Text = 'None yet — one is made automatically before each install (if enabled above).'
+        $t.Text = 'None to show — one is made automatically before each install (if enabled above). Note: Windows only lets elevated apps LIST restore points, so this stays empty unless you run the app as administrator; the points themselves are still created and usable from System Restore.'
         $t.Foreground = $window.Resources['Dim']; $t.FontStyle = 'Italic'; $t.TextWrapping = 'Wrap'
         [void]$RestoreList.Children.Add($t)
     } else {
@@ -1460,9 +1466,9 @@ function Invoke-GameScan {
 
     $games = @(Get-InstalledGames)
     # use the first card of ANY vendor that has a release-notes URL
-    $notesUrl = $null; $ver = $null
+    $notesUrl = $null
     foreach ($c in $script:Cards.Values) {
-        if ($c.NotesUrl) { $notesUrl = $c.NotesUrl; $ver = $c.LatestText.Text; break }
+        if ($c.NotesUrl) { $notesUrl = $c.NotesUrl; break }
     }
     $notes = (Get-DriverNotesText $notesUrl).ToLower()
 
@@ -1890,6 +1896,7 @@ $BtnUpdate.Add_Click({
 $timer = New-Object Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds(150)
 $timer.Add_Tick({
+    try {
     # driver check results
     foreach ($idx in @($script:Cards.Keys)) {
         $c = $script:Cards[$idx]
@@ -2008,8 +2015,9 @@ $timer.Add_Tick({
         }
     }
 
-    # Command Center live refresh (~every 3 s while that page is open)
-    $script:CmdTick = ($script:CmdTick + 1) % 20
+    # Command Center live refresh (~every 5 s while that page is open;
+    # Get-Counter costs a few hundred ms on the UI thread, so keep it sparse)
+    $script:CmdTick = ($script:CmdTick + 1) % 33
     if ($script:CurrentView -eq 'Command' -and $script:CmdTick -eq 0 -and -not $script:CmdBusy) {
         $script:CmdBusy = $true
         try { Update-CommandView } finally { $script:CmdBusy = $false }
@@ -2068,6 +2076,11 @@ $timer.Add_Tick({
                 }
             }
         }
+    }
+    } catch {
+        # never let a transient failure (WMI hiccup, race on a closing window)
+        # crash the whole app from inside the UI pump
+        try { $StatusBar.Text = "⚑ $($_.Exception.Message)" } catch {}
     }
 })
 $timer.Start()
