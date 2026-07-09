@@ -14,6 +14,15 @@ and forges (downloads) it for you with one click — all wrapped in a dark iron-
 
 ## Features
 
+**New in 2.0 — five war-room pages, one lean app:**
+
+- 🛡 **War Chest** — every driver you install is remembered; if a new one betrays you, **re-equip a previous version in one click**. Optionally raises a Windows System Restore point before each install (built-in System Restore, nothing extra).
+- 📡 **The Sentinel** — opt-in scheduled scout (daily/weekly, via Windows Task Scheduler) that checks for new drivers in the background and fires a tray notification when war gear drops. Plus optional minimize-to-tray.
+- 🎮 **Game Ready Radar** — reads the game library files your launchers already keep on disk (Steam manifests, Battle.net/Epic/Ubisoft/EA registrations — nothing new installed) and cross-checks them against the driver's official release notes to show which of *your* games the update tunes.
+- 📊 **Rig Command Center** — live GPU usage, VRAM, and driver age for **all vendors** via Windows' own GPU counters; NVIDIA cards add temperature, clocks, power and fan via `nvidia-smi` (ships inside the driver). No monitoring agents installed — AMD/Intel temps aren't exposed by Windows without the vendor suites, and we don't bundle those on principle.
+
+**The classics:**
+
 - ⚔🦁 **Pick your faction** — one click in the title bar switches between the **Horde** theme
   (black iron, blood red, gold) and the **Alliance** theme (royal blue, gold, silver). Your
   choice is remembered between sessions, and the **window, taskbar, Start Menu and desktop

@@ -27,7 +27,8 @@
     <https://www.gnu.org/licenses/>.
 #>
 param(
-    [switch]$SelfTest   # run headless diagnostics (no GUI) and exit
+    [switch]$SelfTest,  # run headless diagnostics (no GUI) and exit
+    [switch]$Scout      # headless: check for new drivers, toast if found, exit (used by the Sentinel scheduled task)
 )
 
 $ErrorActionPreference = 'Stop'
@@ -36,7 +37,7 @@ $ErrorActionPreference = 'Stop'
 # ---------------------------------------------------------------------------
 #  Shared constants & config
 # ---------------------------------------------------------------------------
-$script:AppVersion = '1.5.1'   # single source of truth - Build.ps1 reads this to version the exe
+$script:AppVersion = '2.0.0'   # single source of truth - Build.ps1 reads this to version the exe
 $script:GitHubRepo = 'dontshome/Warchief-Driver-Updater'
 $script:UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
 $script:OsBuild  = [int](Get-CimInstance Win32_OperatingSystem).BuildNumber
@@ -47,14 +48,19 @@ $script:ConfigDir  = Join-Path $env:APPDATA 'WarchiefDriverUpdater'
 $script:ConfigPath = Join-Path $script:ConfigDir 'config.json'
 
 function Get-AppConfig {
-    $cfg = @{ Theme = 'horde'; SlimInstall = $true; NvidiaStudio = $false }
+    $cfg = @{ Theme = 'horde'; SlimInstall = $true; NvidiaStudio = $false
+              RestorePoint = $true; AutoScout = $false; ScoutFreq = 'Daily'; MinimizeToTray = $false }
     try {
         if (Test-Path $script:ConfigPath) {
             $saved = Get-Content $script:ConfigPath -Raw | ConvertFrom-Json
             if ($saved.Theme -in 'horde', 'alliance') { $cfg.Theme = $saved.Theme }
             if ($null -ne $saved.SlimInstall) { $cfg.SlimInstall = [bool]$saved.SlimInstall }
             elseif ($null -ne $saved.SlimNvidia) { $cfg.SlimInstall = [bool]$saved.SlimNvidia }  # pre-1.2 config
-            if ($null -ne $saved.NvidiaStudio) { $cfg.NvidiaStudio = [bool]$saved.NvidiaStudio }
+            if ($null -ne $saved.NvidiaStudio)   { $cfg.NvidiaStudio   = [bool]$saved.NvidiaStudio }
+            if ($null -ne $saved.RestorePoint)   { $cfg.RestorePoint   = [bool]$saved.RestorePoint }
+            if ($null -ne $saved.AutoScout)      { $cfg.AutoScout      = [bool]$saved.AutoScout }
+            if ($saved.ScoutFreq -in 'Daily','Weekly') { $cfg.ScoutFreq = $saved.ScoutFreq }
+            if ($null -ne $saved.MinimizeToTray) { $cfg.MinimizeToTray = [bool]$saved.MinimizeToTray }
         }
     } catch {}
     return $cfg
@@ -404,6 +410,17 @@ function Measure-SkippedBytes([string]$SevenZip, [string]$ExePath, [string[]]$Fo
     } catch { return 0L }
 }
 
+# --- Restore point (elevated one-liner; Windows throttles to one per 24h) ----
+function New-WarchiefRestorePoint([string]$Desc, $Sync) {
+    try {
+        $cmd = "Checkpoint-Computer -Description '$($Desc -replace "'", '')' -RestorePointType MODIFY_SETTINGS"
+        $p = Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -PassThru `
+             -ArgumentList '-NoProfile', '-Command', $cmd
+        $Sync.RpExit = $p.ExitCode
+    } catch { $Sync.RpError = $_.Exception.Message }
+    $Sync.RpDone = $true
+}
+
 # --- Slim AMD install ---------------------------------------------------------
 # AMD's installer is also an archive. Per AMD's own Command Line Installation
 # guide, "Setup.exe -INSTALL -USE <path>" silently installs only the packages
@@ -484,6 +501,230 @@ function Invoke-NvidiaSlimInstall([string]$ExePath, [string]$WorkDir, $Sync, [st
 
 # make the functions available in THIS scope too
 . ([scriptblock]::Create($script:NetFunctions))
+
+# ===========================================================================
+#  2.0 feature engine  (all built on tools already on the machine - no bloat)
+# ===========================================================================
+$script:WarChestPath = Join-Path $script:ConfigDir 'warchest.json'
+
+# --- War Chest: remember installed drivers so you can re-equip an old one ----
+function Get-WarChest {
+    try { if (Test-Path $script:WarChestPath) { return @(Get-Content $script:WarChestPath -Raw | ConvertFrom-Json) } } catch {}
+    return @()
+}
+function Add-WarChestEntry([string]$Vendor, [string]$Gpu, [string]$Version, [string]$Url, [string]$LocalPath) {
+    $list = @(Get-WarChest | Where-Object { -not ($_.Vendor -eq $Vendor -and $_.Version -eq $Version) })
+    $entry = [pscustomobject]@{ Vendor = $Vendor; Gpu = $Gpu; Version = $Version; Url = $Url
+                               LocalPath = $LocalPath; Date = (Get-Date).ToString('yyyy-MM-dd HH:mm') }
+    $list = @($entry) + $list
+    if ($list.Count -gt 20) { $list = $list[0..19] }
+    try { $list | ConvertTo-Json | Set-Content $script:WarChestPath -Encoding UTF8 } catch {}
+}
+
+# --- Restore points ----------------------------------------------------------
+function Get-AppRestorePoints {
+    try {
+        return @(Get-ComputerRestorePoint -ErrorAction Stop |
+                 Where-Object { $_.Description -like 'Warchief*' } |
+                 Sort-Object SequenceNumber -Descending)
+    } catch { return @() }
+}
+
+# --- Installed games (Steam manifests + known launcher publishers) -----------
+function Get-InstalledGames {
+    $games = New-Object System.Collections.Generic.List[object]
+    try {
+        $steam = (Get-ItemProperty 'HKCU:\Software\Valve\Steam' -ErrorAction Stop).SteamPath
+        if ($steam) {
+            $steam = $steam -replace '/', '\'
+            $libs = @(Join-Path $steam 'steamapps')
+            $vdf = Join-Path $steam 'steamapps\libraryfolders.vdf'
+            if (Test-Path $vdf) {
+                foreach ($m in [regex]::Matches((Get-Content $vdf -Raw), '"path"\s*"([^"]+)"')) {
+                    $libs += (Join-Path ($m.Groups[1].Value -replace '\\\\', '\') 'steamapps')
+                }
+            }
+            foreach ($lib in ($libs | Select-Object -Unique)) {
+                if (Test-Path $lib) {
+                    foreach ($acf in Get-ChildItem $lib -Filter 'appmanifest_*.acf' -ErrorAction SilentlyContinue) {
+                        $nm = [regex]::Match((Get-Content $acf.FullName -Raw -Encoding UTF8), '"name"\s*"([^"]+)"')
+                        if ($nm.Success) { $games.Add([pscustomobject]@{ Name = $nm.Groups[1].Value; Platform = 'Steam' }) }
+                    }
+                }
+            }
+        }
+    } catch {}
+    try {
+        foreach ($k in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+                       'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*') {
+            Get-ItemProperty $k -ErrorAction SilentlyContinue |
+                Where-Object { $_.DisplayName -and $_.Publisher -match 'Blizzard|Riot|Epic Games|Ubisoft|Electronic Arts|Rockstar|Bethesda|CD Projekt' } |
+                ForEach-Object { $games.Add([pscustomobject]@{ Name = $_.DisplayName; Platform = $_.Publisher }) }
+        }
+    } catch {}
+    # drop launchers/runtimes that aren't actually games
+    $games = @($games | Where-Object { $_.Name -notmatch 'Redistributable|Steamworks Common|Proton|Steam Linux|^Battle\.net$|Launcher$' })
+    return @($games | Sort-Object Name -Unique)
+}
+
+# strip a release-notes web page down to readable text for game matching
+function Get-DriverNotesText([string]$Url) {
+    if (-not $Url) { return '' }
+    try {
+        $html = Get-Web $Url
+        $t = [regex]::Replace($html, '(?is)<script.*?</script>', ' ')
+        $t = [regex]::Replace($t, '(?is)<style.*?</style>', ' ')
+        $t = [regex]::Replace($t, '<[^>]+>', ' ')
+        return [System.Net.WebUtility]::HtmlDecode($t)
+    } catch { return '' }
+}
+
+# --- Live GPU stats (nvidia-smi for NVIDIA; perf counters elsewhere) ---------
+function Get-NvSmiStats {
+    $exe = $null
+    foreach ($p in "$env:SystemRoot\System32\nvidia-smi.exe", "$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe") {
+        if (Test-Path $p) { $exe = $p; break }
+    }
+    if (-not $exe) { return $null }
+    try {
+        $q = & $exe '--query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total,clocks.gr,power.draw,fan.speed' '--format=csv,noheader,nounits' 2>$null
+        $rows = @()
+        foreach ($line in @($q)) {
+            if (-not "$line".Trim()) { continue }
+            $f = $line -split '\s*,\s*'
+            $rows += [pscustomobject]@{
+                Name = $f[0]; Temp = $f[1]; Util = $f[2]; MemUsed = $f[3]
+                MemTotal = $f[4]; Clock = $f[5]; Power = $f[6]; Fan = $f[7]
+            }
+        }
+        return $rows
+    } catch { return $null }
+}
+# Universal live stats - works for NVIDIA, AMD and Intel alike using only
+# what Windows already has: GPU perf counters (usage, VRAM in use), the
+# display-class registry (true total VRAM; WMI's AdapterRAM caps at 4 GB)
+# and WMI (driver version/date). NVIDIA rows get extra depth from nvidia-smi.
+function Get-GpuLiveStats {
+    $gpus = @(Get-CimInstance Win32_VideoController |
+              Where-Object { $_.Name -and $_.Name -notmatch 'Microsoft|Virtual|Remote|Parsec|DisplayLink' })
+
+    $util = $null; $vramUsed = $null
+    try {
+        $s = (Get-Counter '\GPU Engine(*engtype_3D)\Utilization Percentage' -ErrorAction Stop).CounterSamples
+        $util = [math]::Round([math]::Min((($s | Measure-Object CookedValue -Sum).Sum), 100), 0)
+    } catch {}
+    try {
+        $m = (Get-Counter '\GPU Adapter Memory(*)\Dedicated Usage' -ErrorAction Stop).CounterSamples
+        $vramUsed = [long](($m | Measure-Object CookedValue -Sum).Sum)
+    } catch {}
+
+    $totals = @{}
+    try {
+        Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}' -ErrorAction Stop |
+            Where-Object { $_.PSChildName -match '^\d{4}$' } | ForEach-Object {
+                $p = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+                if ($p.DriverDesc -and $p.'HardwareInformation.qwMemorySize') {
+                    $totals[$p.DriverDesc] = [long]$p.'HardwareInformation.qwMemorySize'
+                }
+            }
+    } catch {}
+
+    $smi = @()
+    if ($gpus | Where-Object { $_.Name -match 'NVIDIA' }) { $smi = @(Get-NvSmiStats) }
+
+    $out = @()
+    foreach ($g in $gpus) {
+        $smiRow = $smi | Where-Object { $g.Name -like "*$($_.Name)*" -or $_.Name -like "*$($g.Name)*" } | Select-Object -First 1
+        $age = $null; try { $age = [int]((Get-Date) - $g.DriverDate).TotalDays } catch {}
+        $total = $totals[$g.Name]
+        $vendor = if ($g.Name -match 'NVIDIA') { 'NVIDIA' } elseif ($g.Name -match 'AMD|Radeon') { 'AMD' } elseif ($g.Name -match 'Intel') { 'Intel' } else { '' }
+
+        $vramTxt = $null
+        if ($smiRow) { $vramTxt = "$($smiRow.MemUsed) / $($smiRow.MemTotal) MB" }
+        elseif ($null -ne $vramUsed -and $total) { $vramTxt = "{0:N0} / {1:N0} MB" -f ($vramUsed/1MB), ($total/1MB) }
+        elseif ($total) { $vramTxt = "{0:N0} MB total" -f ($total/1MB) }
+
+        $out += [pscustomobject]@{
+            Name = $g.Name; Vendor = $vendor
+            Util = if ($smiRow) { "$($smiRow.Util) %" } elseif ($null -ne $util) { "$util %" } else { $null }
+            Vram = $vramTxt
+            Temp  = if ($smiRow) { "$($smiRow.Temp) °C" } else { $null }
+            Clock = if ($smiRow) { "$($smiRow.Clock) MHz" } else { $null }
+            Power = if ($smiRow) { "$($smiRow.Power) W" } else { $null }
+            Fan   = if ($smiRow) { "$($smiRow.Fan) %" } else { $null }
+            DriverAge = $age
+            HasDeep = [bool]$smiRow
+        }
+    }
+    return ,$out
+}
+
+# --- Sentinel: scheduled background scout ------------------------------------
+function Set-SentinelTask([bool]$Enabled, [string]$Freq) {
+    $name = 'WarchiefDriverSentinel'
+    try {
+        if (-not $Enabled) {
+            Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue
+            return $true
+        }
+        $exe = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        if ($exe -match 'powershell|pwsh') {
+            $inst = Join-Path $env:LOCALAPPDATA 'Programs\Warchief Driver Updater\WarchiefDriverUpdater.exe'
+            if (Test-Path $inst) { $exe = $inst }
+        }
+        $action   = New-ScheduledTaskAction -Execute $exe -Argument '-Scout'
+        $at       = [datetime]::Today.AddHours(12)
+        $trigger  = if ($Freq -eq 'Weekly') { New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday -At $at }
+                    else                     { New-ScheduledTaskTrigger -Daily -At $at }
+        $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+        Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
+        return $true
+    } catch { return $false }
+}
+function Test-SentinelTask {
+    try { return [bool](Get-ScheduledTask -TaskName 'WarchiefDriverSentinel' -ErrorAction SilentlyContinue) } catch { return $false }
+}
+
+# --- Toast notification (tray balloon) ---------------------------------------
+function Show-Toast([string]$Title, [string]$Text) {
+    try {
+        Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+        $ni = New-Object System.Windows.Forms.NotifyIcon
+        $ico = Join-Path $script:ConfigDir "$($script:Config.Theme).ico"
+        if (Test-Path $ico) { $ni.Icon = New-Object System.Drawing.Icon $ico }
+        else { $ni.Icon = [System.Drawing.SystemIcons]::Information }
+        $ni.Visible = $true
+        $ni.BalloonTipTitle = $Title
+        $ni.BalloonTipText  = $Text
+        $ni.ShowBalloonTip(10000)
+        $end = (Get-Date).AddSeconds(9)
+        while ((Get-Date) -lt $end) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 120 }
+        $ni.Visible = $false; $ni.Dispose()
+    } catch {}
+}
+
+# ===========================================================================
+#  Headless Sentinel scout:  .\WarchiefDriverUpdater.ps1 -Scout
+# ===========================================================================
+if ($Scout) {
+    $gpus = @(Get-GpuInventory | Where-Object { $_.Vendor -in 'NVIDIA', 'AMD', 'Intel' })
+    $updates = @()
+    foreach ($g in $gpus) {
+        try {
+            $r = if ($g.Vendor -eq 'NVIDIA') { Get-NvidiaLatest $g.Name $script:NvOsId ([bool]$script:Config.NvidiaStudio) }
+                 elseif ($g.Vendor -eq 'Intel') { Get-IntelLatest $g.Name }
+                 else { Get-AmdLatest $g.Name $script:AmdOsTag }
+            if (-not $r.Error -and $r.Version) {
+                $newer = $false; try { $newer = [version]$r.Version -gt [version]$g.Installed } catch {}
+                if ($newer) { $updates += "$($g.Vendor) $($g.Name): v$($r.Version)" }
+            }
+        } catch {}
+    }
+    if ($updates) {
+        Show-Toast 'New war gear available! ⚔' (($updates -join "`n") + "`n`nOpen Warchief Driver Updater to equip it.")
+    }
+    exit 0
+}
 
 # ---------------------------------------------------------------------------
 #  Self-test mode:  .\WarchiefDriverUpdater.ps1 -SelfTest
@@ -720,12 +961,24 @@ $mainXaml = @'
       </Border>
 
       <!-- banner -->
-      <Border DockPanel.Dock="Top" Padding="20,16,20,12" Background="{DynamicResource BannerBg}">
+      <Border DockPanel.Dock="Top" Padding="20,14,20,8" Background="{DynamicResource BannerBg}">
         <StackPanel>
           <TextBlock x:Name="BannerTitle" Text="⚔  THE WARCHIEF'S ARMORY  ⚔" Foreground="{DynamicResource GoldBright}"
-                     FontSize="26" FontWeight="Bold" HorizontalAlignment="Center"/>
+                     FontSize="24" FontWeight="Bold" HorizontalAlignment="Center"/>
           <TextBlock x:Name="BannerTagline" Text="Lok'tar ogar!" Foreground="{DynamicResource Dim}"
-                     FontSize="14" FontStyle="Italic" HorizontalAlignment="Center" Margin="0,4,0,0"/>
+                     FontSize="13" FontStyle="Italic" HorizontalAlignment="Center" Margin="0,3,0,0"/>
+        </StackPanel>
+      </Border>
+
+      <!-- nav bar -->
+      <Border DockPanel.Dock="Top" Background="{DynamicResource TitleBg}" BorderBrush="{DynamicResource PanelBorder}"
+              BorderThickness="0,1,0,1" Padding="10,5">
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+          <Button x:Name="BtnNavArmory"   Content="⚔ ARMORY"   FontSize="12" Padding="12,5"/>
+          <Button x:Name="BtnNavChest"    Content="🛡 WAR CHEST" FontSize="12" Padding="12,5"/>
+          <Button x:Name="BtnNavRadar"    Content="🎮 RADAR"    FontSize="12" Padding="12,5"/>
+          <Button x:Name="BtnNavCommand"  Content="📊 COMMAND"  FontSize="12" Padding="12,5"/>
+          <Button x:Name="BtnNavSentinel" Content="📡 SENTINEL" FontSize="12" Padding="12,5" Margin="0"/>
         </StackPanel>
       </Border>
 
@@ -759,10 +1012,75 @@ $mainXaml = @'
         </DockPanel>
       </Border>
 
-      <!-- GPU cards -->
-      <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="20,12">
-        <StackPanel x:Name="CardPanel"/>
-      </ScrollViewer>
+      <!-- content: five switchable views -->
+      <Grid>
+        <!-- ARMORY (drivers) -->
+        <ScrollViewer x:Name="ViewArmory" VerticalScrollBarVisibility="Auto" Padding="20,12">
+          <StackPanel x:Name="CardPanel"/>
+        </ScrollViewer>
+
+        <!-- WAR CHEST (backup + rollback) -->
+        <ScrollViewer x:Name="ViewChest" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" Padding="20,12">
+          <StackPanel>
+            <TextBlock Text="🛡 THE WAR CHEST" FontSize="20" FontWeight="Bold" Foreground="{DynamicResource GoldBright}"/>
+            <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource Dim}" Margin="0,4,0,10"
+                       Text="Your saved war gear. If a new driver betrays you in battle, re-equip a proven one — or roll the whole rig back to a restore point."/>
+            <CheckBox x:Name="ChkRestorePoint" Foreground="{DynamicResource Parchment}"
+                      Content="Create a system restore point before each driver install (recommended)"
+                      ToolTip="Uses Windows' built-in System Restore — one admin prompt before the install. Windows only allows one restore point per 24h, so repeat installs may skip it."/>
+            <TextBlock Text="⚔ Saved drivers" FontSize="15" FontWeight="Bold" Foreground="{DynamicResource Gold}" Margin="0,14,0,4"/>
+            <TextBlock x:Name="ChestEmpty" Text="No saved drivers yet — install one and it'll be kept here so you can revert."
+                       Foreground="{DynamicResource Dim}" FontStyle="Italic" TextWrapping="Wrap"/>
+            <StackPanel x:Name="ChestList"/>
+            <TextBlock Text="🕮 Restore points made by this app" FontSize="15" FontWeight="Bold" Foreground="{DynamicResource Gold}" Margin="0,16,0,4"/>
+            <StackPanel x:Name="RestoreList"/>
+            <Button x:Name="BtnOpenRestore" Content="Open Windows System Restore" HorizontalAlignment="Left" Margin="0,8,0,0"/>
+          </StackPanel>
+        </ScrollViewer>
+
+        <!-- RADAR (game ready) -->
+        <ScrollViewer x:Name="ViewRadar" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" Padding="20,12">
+          <StackPanel>
+            <TextBlock Text="🎮 GAME READY RADAR" FontSize="20" FontWeight="Bold" Foreground="{DynamicResource GoldBright}"/>
+            <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource Dim}" Margin="0,4,0,10"
+                       Text="Which of your installed games the newest driver tunes up. The radar reads the library files your launchers already keep on disk (Steam's manifests, plus games registered by Battle.net, Epic, Ubisoft, EA, Riot and friends) — nothing new is installed — and cross-checks them against the vendor's official release notes."/>
+            <Button x:Name="BtnScanGames" Content="🔍 SWEEP THE BATTLEFIELD (SCAN GAMES)" HorizontalAlignment="Left"/>
+            <TextBlock x:Name="RadarSummary" TextWrapping="Wrap" Foreground="{DynamicResource Parchment}" Margin="0,10,0,6"/>
+            <StackPanel x:Name="RadarList"/>
+          </StackPanel>
+        </ScrollViewer>
+
+        <!-- COMMAND CENTER (live stats) -->
+        <ScrollViewer x:Name="ViewCommand" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" Padding="20,12">
+          <StackPanel>
+            <TextBlock Text="📊 RIG COMMAND CENTER" FontSize="20" FontWeight="Bold" Foreground="{DynamicResource GoldBright}"/>
+            <TextBlock x:Name="CmdHint" TextWrapping="Wrap" Foreground="{DynamicResource Dim}" Margin="0,4,0,10"
+                       Text="Live readings from your war machines. Updates every couple of seconds while this page is open."/>
+            <StackPanel x:Name="StatPanel"/>
+          </StackPanel>
+        </ScrollViewer>
+
+        <!-- SENTINEL (auto-scout + tray) -->
+        <ScrollViewer x:Name="ViewSentinel" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" Padding="20,12">
+          <StackPanel>
+            <TextBlock Text="📡 THE SENTINEL" FontSize="20" FontWeight="Bold" Foreground="{DynamicResource GoldBright}"/>
+            <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource Dim}" Margin="0,4,0,10"
+                       Text="Stand a watch so you never miss new war gear. The Sentinel quietly checks for new drivers on your schedule and sounds the horn when one drops."/>
+            <CheckBox x:Name="ChkAutoScout" Foreground="{DynamicResource Parchment}"
+                      Content="Let the Sentinel scout for new drivers automatically"/>
+            <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+              <TextBlock Text="How often:" Foreground="{DynamicResource Parchment}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+              <ComboBox x:Name="CmbFreq" Width="130">
+                <ComboBoxItem Content="Every day"/>
+                <ComboBoxItem Content="Every week"/>
+              </ComboBox>
+            </StackPanel>
+            <CheckBox x:Name="ChkTray" Foreground="{DynamicResource Parchment}" Margin="0,12,0,0"
+                      Content="Keep a sentinel in the system tray while running (minimize to tray instead of closing)"/>
+            <TextBlock x:Name="SentinelStatus" TextWrapping="Wrap" Foreground="{DynamicResource Dim}" Margin="0,14,0,0"/>
+          </StackPanel>
+        </ScrollViewer>
+      </Grid>
     </DockPanel>
   </Border>
 </Window>
@@ -806,13 +1124,41 @@ $cardXaml = @'
 '@
 
 $window = [Windows.Markup.XamlReader]::Parse($mainXaml)
-foreach ($n in 'TitleBar','TitleBarText','BannerTitle','BannerTagline','BtnUpdate','BtnFaction','BtnAbout','BtnMin','BtnClose','BtnRefresh','ChkSlim','ChkStudio','StatusBar','CardPanel') {
+foreach ($n in 'TitleBar','TitleBarText','BannerTitle','BannerTagline','BtnUpdate','BtnFaction','BtnAbout','BtnMin','BtnClose','BtnRefresh','ChkSlim','ChkStudio','StatusBar','CardPanel',
+                'BtnNavArmory','BtnNavChest','BtnNavRadar','BtnNavCommand','BtnNavSentinel',
+                'ViewArmory','ViewChest','ViewRadar','ViewCommand','ViewSentinel',
+                'ChkRestorePoint','ChestEmpty','ChestList','RestoreList','BtnOpenRestore',
+                'BtnScanGames','RadarSummary','RadarList','CmdHint','StatPanel',
+                'ChkAutoScout','CmbFreq','ChkTray','SentinelStatus') {
     Set-Variable -Name $n -Value $window.FindName($n)
 }
 
 $TitleBar.Add_MouseLeftButtonDown({ $window.DragMove() })
 $BtnMin.Add_Click({ $window.WindowState = 'Minimized' })
 $BtnClose.Add_Click({ $window.Close() })
+
+# minimize-to-tray (opt-in via the Sentinel page)
+Add-Type -AssemblyName System.Windows.Forms
+$script:TrayIcon = $null
+function Show-TrayIcon {
+    if ($script:TrayIcon) { $script:TrayIcon.Visible = $true; return }
+    $ni = New-Object System.Windows.Forms.NotifyIcon
+    $ico = Join-Path $script:ConfigDir "$($script:Config.Theme).ico"
+    $ni.Icon = if (Test-Path $ico) { New-Object System.Drawing.Icon $ico } else { [System.Drawing.SystemIcons]::Application }
+    $ni.Text = 'Warchief Driver Updater — the sentinel stands watch'
+    $ni.Add_MouseDoubleClick({
+        $window.Show(); $window.WindowState = 'Normal'; $window.Activate()
+        if ($script:TrayIcon) { $script:TrayIcon.Visible = $false }
+    })
+    $ni.Visible = $true
+    $script:TrayIcon = $ni
+}
+$window.Add_StateChanged({
+    if ($window.WindowState -eq 'Minimized' -and $script:Config.MinimizeToTray) {
+        $window.Hide()
+        Show-TrayIcon
+    }
+})
 
 # GPL "Appropriate Legal Notices": copyright + no-warranty + license link
 $BtnAbout.Add_Click({
@@ -905,7 +1251,250 @@ $ChkStudio.Add_Click({
     Start-Scan   # Game Ready vs Studio changes the answer — scout again
 })
 
+# ---------------------------------------------------------------------------
+#  Navigation between the five views
+# ---------------------------------------------------------------------------
+$script:Views = @{
+    Armory   = @{ View = $ViewArmory;   Btn = $BtnNavArmory }
+    Chest    = @{ View = $ViewChest;    Btn = $BtnNavChest }
+    Radar    = @{ View = $ViewRadar;    Btn = $BtnNavRadar }
+    Command  = @{ View = $ViewCommand;  Btn = $BtnNavCommand }
+    Sentinel = @{ View = $ViewSentinel; Btn = $BtnNavSentinel }
+}
+$script:CurrentView = 'Armory'
+function Show-View([string]$name) {
+    foreach ($k in $script:Views.Keys) {
+        $script:Views[$k].View.Visibility = if ($k -eq $name) { 'Visible' } else { 'Collapsed' }
+        $script:Views[$k].Btn.Opacity     = if ($k -eq $name) { 1.0 } else { 0.55 }
+    }
+    $script:CurrentView = $name
+    # driver-specific footer controls only make sense on the Armory page
+    $footerVis = if ($name -eq 'Armory') { 'Visible' } else { 'Collapsed' }
+    $ChkSlim.Visibility = $footerVis; $ChkStudio.Visibility = $footerVis; $BtnRefresh.Visibility = $footerVis
+    switch ($name) {
+        'Chest'    { Update-WarChestView }
+        'Command'  { Update-CommandView }
+        'Sentinel' { Update-SentinelStatus }
+    }
+}
+$BtnNavArmory.Add_Click({ Show-View 'Armory' })
+$BtnNavChest.Add_Click({ Show-View 'Chest' })
+$BtnNavRadar.Add_Click({ Show-View 'Radar' })
+$BtnNavCommand.Add_Click({ Show-View 'Command' })
+$BtnNavSentinel.Add_Click({ Show-View 'Sentinel' })
+
+# ---------------------------------------------------------------------------
+#  War Chest view
+# ---------------------------------------------------------------------------
+$ChkRestorePoint.IsChecked = [bool]$script:Config.RestorePoint
+$ChkRestorePoint.Add_Click({ $script:Config.RestorePoint = [bool]$ChkRestorePoint.IsChecked; Save-AppConfig })
+$BtnOpenRestore.Add_Click({ try { Start-Process 'rstrui.exe' } catch {} })
+
+function New-ChestRow($entry) {
+    $b = New-Object Windows.Controls.Border
+    $b.BorderBrush = $window.Resources['PanelBorder']; $b.BorderThickness = 1
+    $b.Background = $window.Resources['PanelBg']; $b.Margin = '0,0,0,8'; $b.Padding = '12,8'
+    $dp = New-Object Windows.Controls.DockPanel
+    $btn = New-Object Windows.Controls.Button
+    $btn.Content = '⚔ RE-EQUIP'; $btn.Margin = '10,0,0,0'; $btn.Tag = $entry
+    [Windows.Controls.DockPanel]::SetDock($btn, 'Right')
+    $btn.Add_Click({ param($s,$e) Invoke-Reequip $s.Tag })
+    $tb = New-Object Windows.Controls.TextBlock
+    $tb.Foreground = $window.Resources['Parchment']; $tb.VerticalAlignment = 'Center'; $tb.TextWrapping = 'Wrap'
+    $tb.Inlines.Add((New-Object Windows.Documents.Run("$($entry.Vendor)  v$($entry.Version)") -Property @{ FontWeight='Bold'; Foreground=$window.Resources['GoldBright'] }))
+    $tb.Inlines.Add("   $($entry.Gpu)   ·   installed $($entry.Date)")
+    [void]$dp.Children.Add($btn); [void]$dp.Children.Add($tb)
+    $b.Child = $dp; return $b
+}
+
+function Update-WarChestView {
+    $ChestList.Children.Clear()
+    $chest = @(Get-WarChest)
+    $ChestEmpty.Visibility = if ($chest.Count) { 'Collapsed' } else { 'Visible' }
+    foreach ($e in $chest) { [void]$ChestList.Children.Add((New-ChestRow $e)) }
+
+    $RestoreList.Children.Clear()
+    $rps = @(Get-AppRestorePoints)
+    if (-not $rps.Count) {
+        $t = New-Object Windows.Controls.TextBlock
+        $t.Text = 'None yet — one is made automatically before each install (if enabled above).'
+        $t.Foreground = $window.Resources['Dim']; $t.FontStyle = 'Italic'; $t.TextWrapping = 'Wrap'
+        [void]$RestoreList.Children.Add($t)
+    } else {
+        foreach ($rp in $rps) {
+            $when = ''
+            try { $when = [Management.ManagementDateTimeConverter]::ToDateTime($rp.CreationTime).ToString('yyyy-MM-dd HH:mm') } catch {}
+            $t = New-Object Windows.Controls.TextBlock
+            $t.Text = "• $($rp.Description)   $when"
+            $t.Foreground = $window.Resources['Parchment']; $t.Margin = '0,0,0,3'
+            [void]$RestoreList.Children.Add($t)
+        }
+    }
+}
+
+function Invoke-Reequip($entry) {
+    $r = [Windows.MessageBox]::Show(
+        "Re-equip $($entry.Vendor) driver v$($entry.Version)?`n`nThis re-runs that version's installer so you can roll back from a driver that's giving you trouble.",
+        'War Chest — Re-equip', 'YesNo', 'Question')
+    if ($r -ne 'Yes') { return }
+    if ($entry.LocalPath -and (Test-Path $entry.LocalPath)) {
+        try { Start-Process $entry.LocalPath; $StatusBar.Text = "Re-equipping v$($entry.Version)..." } catch { $StatusBar.Text = "Couldn't launch installer: $($_.Exception.Message)" }
+    } elseif ($entry.Url) {
+        $StatusBar.Text = "Re-downloading v$($entry.Version) to re-equip..."
+        $script:Sync.ReUrl = $entry.Url
+        $script:Sync.ReDest = Join-Path (Get-DownloadFolder) ([IO.Path]::GetFileName(([uri]$entry.Url).AbsolutePath))
+        $script:Sync.ReActive = $true
+        $script:Sync.ReDlDone = $false; $script:Sync.ReDlError = $null
+        $script:Sync.ReDlBytes = 0L; $script:Sync.ReDlTotal = 0L
+        $ref = if ($entry.Vendor -eq 'AMD') { 'https://www.amd.com/' } else { $null }
+        $script:Sync.ReRef = $ref
+        Start-BackgroundScript 'Invoke-FileDownload $sync.ReUrl $sync.ReDest $sync $sync.ReRef "Re"'
+    } else {
+        [void][Windows.MessageBox]::Show('That saved driver has no installer or download link on record.', 'War Chest', 'OK', 'Warning')
+    }
+}
+
+# ---------------------------------------------------------------------------
+#  Radar view
+# ---------------------------------------------------------------------------
+$BtnScanGames.Add_Click({ Invoke-GameScan })
+function Invoke-GameScan {
+    $RadarList.Children.Clear()
+    $RadarSummary.Text = 'Sweeping your libraries and reading the vendor release notes...'
+    $BtnScanGames.IsEnabled = $false
+    $window.Dispatcher.Invoke([action]{}, 'Background')
+
+    $games = @(Get-InstalledGames)
+    # use the first NVIDIA/AMD card that has a notes URL
+    $notesUrl = $null; $ver = $null
+    foreach ($c in $script:Cards.Values) {
+        if ($c.NotesUrl -and $c.Gpu.Vendor -in 'NVIDIA','AMD') { $notesUrl = $c.NotesUrl; $ver = $c.LatestText.Text; break }
+    }
+    $notes = (Get-DriverNotesText $notesUrl).ToLower()
+
+    $matched = @()
+    foreach ($g in $games) {
+        $isOpt = $false
+        if ($notes) {
+            $key = ($g.Name -replace '[^\w ]', '').Trim().ToLower()
+            if ($key.Length -ge 4 -and $notes.Contains($key)) { $isOpt = $true }
+        }
+        if ($isOpt) { $matched += $g.Name }
+        [void]$RadarList.Children.Add((New-RadarRow $g.Name $g.Platform $isOpt))
+    }
+    $BtnScanGames.IsEnabled = $true
+    if (-not $games.Count) {
+        $RadarSummary.Text = "No installed games detected (I look at Steam + major launchers). Install a game or check Steam is set up."
+    } elseif (-not $notes) {
+        $RadarSummary.Text = "Found $($games.Count) installed game(s). Couldn't read this driver's release notes to match optimizations — showing your library."
+    } elseif ($matched.Count) {
+        $RadarSummary.Text = "⚔ The newest driver's notes call out $($matched.Count) game(s) you have installed: $($matched -join ', ')."
+    } else {
+        $RadarSummary.Text = "Found $($games.Count) installed game(s). The newest driver's notes don't specifically mention any of them (still worth updating for general fixes)."
+    }
+}
+function New-RadarRow([string]$name, [string]$platform, [bool]$optimized) {
+    $b = New-Object Windows.Controls.Border
+    $b.BorderBrush = $window.Resources['PanelBorder']; $b.BorderThickness = 1
+    $b.Background = $window.Resources['PanelBg']; $b.Margin = '0,0,0,6'; $b.Padding = '12,7'
+    $dp = New-Object Windows.Controls.DockPanel
+    $badge = New-Object Windows.Controls.TextBlock
+    [Windows.Controls.DockPanel]::SetDock($badge, 'Right'); $badge.VerticalAlignment = 'Center'; $badge.FontWeight = 'Bold'; $badge.FontSize = 12
+    if ($optimized) { $badge.Text = '🔥 TUNED BY LATEST'; $badge.Foreground = ($script:BrushConv.ConvertFromString($script:ColUpdate)) }
+    else            { $badge.Text = $platform;            $badge.Foreground = $window.Resources['Dim'] }
+    $tb = New-Object Windows.Controls.TextBlock
+    $tb.Text = $name; $tb.Foreground = $window.Resources['Parchment']; $tb.VerticalAlignment = 'Center'; $tb.TextTrimming = 'CharacterEllipsis'
+    [void]$dp.Children.Add($badge); [void]$dp.Children.Add($tb)
+    $b.Child = $dp; return $b
+}
+
+# ---------------------------------------------------------------------------
+#  Command Center view (live stats; updated by the main pump when visible)
+# ---------------------------------------------------------------------------
+function Update-CommandView {
+    $rows = @(Get-GpuLiveStats)
+    $StatPanel.Children.Clear()
+    if (-not $rows.Count) {
+        $t = New-Object Windows.Controls.TextBlock
+        $t.Text = 'No GPUs detected.'; $t.Foreground = $window.Resources['Dim']
+        [void]$StatPanel.Children.Add($t)
+        return
+    }
+    foreach ($r in $rows) { [void]$StatPanel.Children.Add((New-StatCard $r)) }
+    $CmdHint.Text = 'Usage & VRAM come from Windows'' own GPU counters (all vendors). NVIDIA cards add temp/clock/power/fan via nvidia-smi, which ships inside the driver. Updates every few seconds.'
+}
+function New-StatCard($r) {
+    $b = New-Object Windows.Controls.Border
+    $b.BorderBrush = $window.Resources['PanelBorder']; $b.BorderThickness = 2
+    $b.Background = $window.Resources['PanelBg']; $b.Margin = '0,0,0,12'; $b.Padding = '16,12'
+    $sp = New-Object Windows.Controls.StackPanel
+    $title = New-Object Windows.Controls.TextBlock
+    $title.Text = $r.Name; $title.FontWeight = 'Bold'; $title.FontSize = 16; $title.Foreground = $window.Resources['GoldBright']; $title.Margin = '0,0,0,8'
+    [void]$sp.Children.Add($title)
+    $ageTxt = if ($null -ne $r.DriverAge) { "$($r.DriverAge) day$(if ($r.DriverAge -ne 1) {'s'}) old" } else { $null }
+    $stats = @(
+        @('📈 GPU usage',  $r.Util),
+        @('🧠 VRAM',       $r.Vram),
+        @('🌡 Temperature',$r.Temp),
+        @('🎛 Core clock', $r.Clock),
+        @('⚡ Power draw', $r.Power),
+        @('🌀 Fan',        $r.Fan),
+        @('🗓 Driver age', $ageTxt)
+    )
+    foreach ($s in $stats) {
+        if (-not $s[1]) { continue }   # only show what this vendor actually exposes
+        $g = New-Object Windows.Controls.Grid
+        $c1 = New-Object Windows.Controls.ColumnDefinition; $c1.Width = '150'
+        $c2 = New-Object Windows.Controls.ColumnDefinition
+        $g.ColumnDefinitions.Add($c1); $g.ColumnDefinitions.Add($c2)
+        $l = New-Object Windows.Controls.TextBlock; $l.Text = $s[0]; $l.Foreground = $window.Resources['Dim']; $l.FontSize = 13; $l.Margin = '0,2,0,2'
+        $v = New-Object Windows.Controls.TextBlock; $v.Text = $s[1]; $v.Foreground = $window.Resources['Parchment']; $v.FontSize = 13; $v.FontWeight = 'Bold'; $v.Margin = '0,2,0,2'
+        [Windows.Controls.Grid]::SetColumn($v, 1)
+        [void]$g.Children.Add($l); [void]$g.Children.Add($v)
+        [void]$sp.Children.Add($g)
+    }
+    if (-not $r.HasDeep -and $r.Vendor -in 'AMD','Intel') {
+        $note = New-Object Windows.Controls.TextBlock
+        $note.TextWrapping = 'Wrap'; $note.FontStyle = 'Italic'; $note.FontSize = 11.5
+        $note.Foreground = $window.Resources['Dim']; $note.Margin = '0,6,0,0'
+        $note.Text = "Windows doesn't expose $($r.Vendor) temperature/clocks without the vendor's app suite — the very bloat this tool skips, so usage, VRAM and driver age are shown instead."
+        [void]$sp.Children.Add($note)
+    }
+    $b.Child = $sp; return $b
+}
+
+# ---------------------------------------------------------------------------
+#  Sentinel view
+# ---------------------------------------------------------------------------
+$ChkAutoScout.IsChecked = [bool]$script:Config.AutoScout
+$CmbFreq.SelectedIndex  = if ($script:Config.ScoutFreq -eq 'Weekly') { 1 } else { 0 }
+$ChkTray.IsChecked      = [bool]$script:Config.MinimizeToTray
+function Apply-SentinelTask {
+    $freq = if ($CmbFreq.SelectedIndex -eq 1) { 'Weekly' } else { 'Daily' }
+    $script:Config.AutoScout = [bool]$ChkAutoScout.IsChecked
+    $script:Config.ScoutFreq = $freq
+    Save-AppConfig
+    $ok = Set-SentinelTask ([bool]$ChkAutoScout.IsChecked) $freq
+    if (-not $ok) {
+        [void][Windows.MessageBox]::Show("Couldn't update the scheduled task. You can still scout manually.", 'Sentinel', 'OK', 'Warning')
+    }
+    Update-SentinelStatus
+}
+$ChkAutoScout.Add_Click({ Apply-SentinelTask })
+$CmbFreq.Add_SelectionChanged({ if ($ChkAutoScout.IsChecked) { Apply-SentinelTask } else { $script:Config.ScoutFreq = $(if ($CmbFreq.SelectedIndex -eq 1) {'Weekly'} else {'Daily'}); Save-AppConfig } })
+$ChkTray.Add_Click({ $script:Config.MinimizeToTray = [bool]$ChkTray.IsChecked; Save-AppConfig })
+function Update-SentinelStatus {
+    $on = Test-SentinelTask
+    $freq = if ($script:Config.ScoutFreq -eq 'Weekly') { 'every Monday' } else { 'every day' }
+    $SentinelStatus.Text = if ($on) {
+        "🟢 Sentinel is standing watch — scouting $freq around noon. You'll get a tray notification when new war gear drops."
+    } else {
+        "⚪ Sentinel is off. Enable it above to be alerted automatically when a new driver is released."
+    }
+}
+
 Set-Theme $script:Config.Theme
+Show-View 'Armory'
 
 # ---------------------------------------------------------------------------
 #  App state
@@ -997,11 +1586,38 @@ function Invoke-ActionButton([int]$idx) {
 
             Start-BackgroundScript 'Invoke-FileDownload $sync.DlUrl $sync.DlDest $sync $sync.DlRef'
         }
-        'downloaded' {  # launch installer (slim/driver-only path when enabled)
-            # the AMD "minimalsetup" web installer has no packages inside to slim down
-            $slimable = ($c.Gpu.Vendor -eq 'NVIDIA') -or
-                        ($c.Gpu.Vendor -eq 'AMD' -and $c.FilePath -notmatch 'minimalsetup')
-            if ($ChkSlim.IsChecked -and $slimable) {
+        'downloaded' {  # (optional restore point first, then) launch installer
+            if ($ChkRestorePoint.IsChecked -and -not $script:Sync.RpActive) {
+                $script:Sync.RpActive = $true
+                $script:Sync.RpIndex  = $idx
+                $script:Sync.RpDone   = $false
+                $script:Sync.RpError  = $null
+                $script:Sync.RpDesc   = "Warchief before $($c.Gpu.Vendor) driver $($c.LatestVersion)"
+                $c.BtnAction.IsEnabled = $false
+                $c.StatusText.Text = '🛡 Raising a fallback camp (system restore point) — approve the admin prompt...'
+                $c.StatusText.Foreground = $script:ColWarn
+                $StatusBar.Text = 'Creating a restore point before the install (can take up to a minute)...'
+                Start-BackgroundScript 'New-WarchiefRestorePoint $sync.RpDesc $sync'
+                return   # the timer continues to Invoke-InstallPhase when the camp is up
+            }
+            Invoke-InstallPhase $idx
+        }
+        'manual' {
+            if ($c.NotesUrl) { Start-Process $c.NotesUrl }
+        }
+    }
+}
+
+# the actual install launch, shared by the direct path and the post-restore-point path
+function Invoke-InstallPhase([int]$idx) {
+    $c = $script:Cards[$idx]
+    # record what we're equipping so the War Chest can offer it for rollback later
+    if ($c.LatestVersion) { Add-WarChestEntry $c.Gpu.Vendor $c.Gpu.Name $c.LatestVersion $c.Url $c.FilePath }
+
+    # the AMD "minimalsetup" web installer has no packages inside to slim down
+    $slimable = ($c.Gpu.Vendor -eq 'NVIDIA') -or
+                ($c.Gpu.Vendor -eq 'AMD' -and $c.FilePath -notmatch 'minimalsetup')
+    if ($ChkSlim.IsChecked -and $slimable) {
                 if ($script:Sync.SlimActive) { return }
                 $script:Sync.SlimActive = $true
                 $script:Sync.SlimIndex  = $idx
@@ -1030,17 +1646,12 @@ function Invoke-ActionButton([int]$idx) {
                     $StatusBar.Text = 'Slim AMD install: unpacking driver package (big one, hang tight)...'
                     Start-BackgroundScript 'Invoke-AmdSlimInstall $sync.SlimExe $sync.SlimDir $sync $sync.SlimTools'
                 }
-            } else {
-                try {
-                    Start-Process -FilePath $c.FilePath
-                    $StatusBar.Text = 'Installer launched. Victory awaits, champion!'
-                } catch {
-                    $StatusBar.Text = "Could not launch installer: $($_.Exception.Message)"
-                }
-            }
-        }
-        'manual' {
-            if ($c.NotesUrl) { Start-Process $c.NotesUrl }
+    } else {
+        try {
+            Start-Process -FilePath $c.FilePath
+            $StatusBar.Text = 'Installer launched. Victory awaits, champion!'
+        } catch {
+            $StatusBar.Text = "Could not launch installer: $($_.Exception.Message)"
         }
     }
 }
@@ -1070,9 +1681,10 @@ function Apply-CheckResult([int]$idx, $r) {
         }
         return
     }
-    $c.Url      = $r.Url
-    $c.NotesUrl = $r.Notes
-    $c.Referer  = $r.Referer
+    $c.Url           = $r.Url
+    $c.NotesUrl      = $r.Notes
+    $c.Referer       = $r.Referer
+    $c.LatestVersion = $r.Version
     $extra = @(); if ($r.Date) { $extra += $r.Date }; if ($r.Size) { $extra += $r.Size }
     $c.LatestText.Text = "$($r.Version)" + $(if ($extra) { "   ($($extra -join ', '))" })
     $c.BtnNotes.IsEnabled = [bool]$r.Notes
@@ -1269,6 +1881,45 @@ $timer.Add_Tick({
         }
     }
 
+    # restore point finished -> continue into the actual install
+    if ($script:Sync.RpActive -and $script:Sync.RpDone) {
+        $script:Sync.RpActive = $false
+        $idx = $script:Sync.RpIndex
+        $c = $script:Cards[$idx]
+        if ($c) {
+            if ($script:Sync.RpError) {
+                $c.StatusText.Text = "⚑ Couldn't raise the fallback camp ($($script:Sync.RpError)) — marching on without it."
+                $c.StatusText.Foreground = $script:ColWarn
+            } else {
+                $StatusBar.Text = 'Fallback camp raised. Beginning the install...'
+            }
+            $c.BtnAction.IsEnabled = $true
+            Invoke-InstallPhase $idx
+        }
+    }
+
+    # War Chest re-equip download
+    if ($script:Sync.ReActive) {
+        $total = [long]$script:Sync.ReDlTotal; $bytes = [long]$script:Sync.ReDlBytes
+        if ($total -gt 0) { $StatusBar.Text = "Re-downloading old driver: $(Format-Bytes $bytes) / $(Format-Bytes $total)" }
+        if ($script:Sync.ReDlDone) {
+            $script:Sync.ReActive = $false
+            if ($script:Sync.ReDlError) {
+                $StatusBar.Text = "Re-download failed: $($script:Sync.ReDlError)"
+            } else {
+                try { Start-Process $script:Sync.ReDest; $StatusBar.Text = 'Old war gear installer launched — follow its steps to roll back.' }
+                catch { $StatusBar.Text = "Couldn't launch installer: $($_.Exception.Message)" }
+            }
+        }
+    }
+
+    # Command Center live refresh (~every 3 s while that page is open)
+    $script:CmdTick = ($script:CmdTick + 1) % 20
+    if ($script:CurrentView -eq 'Command' -and $script:CmdTick -eq 0 -and -not $script:CmdBusy) {
+        $script:CmdBusy = $true
+        try { Update-CommandView } finally { $script:CmdBusy = $false }
+    }
+
     # slim install progress (both vendors)
     if ($script:Sync.SlimActive) {
         $idx = $script:Sync.SlimIndex
@@ -1331,6 +1982,7 @@ $window.Add_ContentRendered({ Start-Scan; Start-UpdateCheck })
 
 # cleanup
 $timer.Stop()
+if ($script:TrayIcon) { try { $script:TrayIcon.Visible = $false; $script:TrayIcon.Dispose() } catch {} }
 foreach ($r in $script:Runspaces) {
     try { $r.PS.Stop(); $r.PS.Dispose(); $r.RS.Close() } catch {}
 }
