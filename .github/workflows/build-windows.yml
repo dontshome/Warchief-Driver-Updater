@@ -23,15 +23,23 @@ jobs:
         shell: powershell
         run: powershell -ExecutionPolicy Bypass -File .\Build.ps1
 
+      - name: Checksums
+        shell: powershell
+        run: |
+          Get-ChildItem dist\*.exe | Get-FileHash -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
+            Set-Content -Encoding ascii dist\SHA256SUMS.txt
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: warchief-driver-updater-windows
           path: |
             dist/*.exe
+            dist/SHA256SUMS.txt
 
       - name: Upload to release
         if: ${{ inputs.release_tag != '' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
-        run: gh release upload "${{ inputs.release_tag }}" dist/*.exe --clobber
+        run: gh release upload "${{ inputs.release_tag }}" dist/*.exe dist/SHA256SUMS.txt --clobber
