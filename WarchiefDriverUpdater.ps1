@@ -129,6 +129,15 @@ $script:ColGood = '#7FB347'; $script:ColUpdate = '#FF6B35'; $script:ColWarn = '#
 # ---------------------------------------------------------------------------
 #  GPU detection (local, fast)
 # ---------------------------------------------------------------------------
+# Name match first, AdapterCompatibility as a fallback for GPUs whose Name
+# string alone doesn't give away the vendor.
+function Get-GpuVendor($vc) {
+    if ($vc.Name -match 'NVIDIA' -or $vc.AdapterCompatibility -match 'NVIDIA') { return 'NVIDIA' }
+    if ($vc.Name -match 'AMD|Radeon' -or $vc.AdapterCompatibility -match 'AMD|Advanced Micro') { return 'AMD' }
+    if ($vc.Name -match 'Intel') { return 'Intel' }
+    return $null
+}
+
 function Get-GpuInventory {
     $gpus = @()
     $i = 0
@@ -137,10 +146,7 @@ function Get-GpuInventory {
         if (-not $name) { continue }
         if ($name -match 'Microsoft|Virtual|Remote|Parsec|DisplayLink|Meta ') { continue }
 
-        $vendor = $null
-        if ($name -match 'NVIDIA' -or $vc.AdapterCompatibility -match 'NVIDIA') { $vendor = 'NVIDIA' }
-        elseif ($name -match 'AMD|Radeon' -or $vc.AdapterCompatibility -match 'AMD|Advanced Micro') { $vendor = 'AMD' }
-        elseif ($name -match 'Intel') { $vendor = 'Intel' }
+        $vendor = Get-GpuVendor $vc
         if (-not $vendor) { continue }
 
         $installed = $null
@@ -189,30 +195,17 @@ $UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 function Get-Web([string]$Url, [string]$Referer) {
-    $req = [Net.HttpWebRequest]::Create($Url)
-    $req.UserAgent = $UA
-    $req.Timeout   = 30000
-    if ($Referer) { $req.Referer = $Referer }
-    $resp = $req.GetResponse()
-    try {
-        $sr = New-Object IO.StreamReader($resp.GetResponseStream())
-        return $sr.ReadToEnd()
-    } finally { $resp.Close() }
+    $params = @{ Uri = $Url; UserAgent = $UA; TimeoutSec = 30; UseBasicParsing = $true }
+    if ($Referer) { $params.Headers = @{ Referer = $Referer } }
+    return (Invoke-WebRequest @params).Content
 }
 
 # --- Self-update check --------------------------------------------------------
 # Asks GitHub's public API for the newest release tag/assets. Never installs
 # anything on its own - it only reports what it found so the UI can ask you.
 function Get-LatestReleaseInfo([string]$Repo) {
-    $req = [Net.HttpWebRequest]::Create("https://api.github.com/repos/$Repo/releases/latest")
-    $req.UserAgent = $UA
-    $req.Accept    = 'application/vnd.github+json'
-    $req.Timeout   = 15000
-    $resp = $req.GetResponse()
-    try {
-        $sr = New-Object IO.StreamReader($resp.GetResponseStream())
-        $json = $sr.ReadToEnd() | ConvertFrom-Json
-    } finally { $resp.Close() }
+    $json = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" `
+        -UserAgent $UA -Headers @{ Accept = 'application/vnd.github+json' } -TimeoutSec 15 -UseBasicParsing
 
     $tag = $json.tag_name -replace '^v', ''
     $setupAsset = $json.assets | Where-Object { $_.name -match 'Setup\.exe$' } | Select-Object -First 1
@@ -435,15 +428,7 @@ function Get-SevenZip([string]$ToolDir) {
     if (Test-Path $local) { return $local }
     # fetch the official standalone console version (~600 KB) from 7-zip.org
     if (-not (Test-Path $ToolDir)) { New-Item -ItemType Directory -Force -Path $ToolDir | Out-Null }
-    $req = [Net.HttpWebRequest]::Create('https://www.7-zip.org/a/7zr.exe')
-    $req.UserAgent = $UA
-    $resp = $req.GetResponse()
-    $in  = $resp.GetResponseStream()
-    $out = [IO.File]::Create($local)
-    try {
-        $buf = New-Object byte[] 65536
-        while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) { $out.Write($buf, 0, $n) }
-    } finally { $out.Close(); $in.Close(); $resp.Close() }
+    Invoke-WebRequest -Uri 'https://www.7-zip.org/a/7zr.exe' -UserAgent $UA -OutFile $local -UseBasicParsing
     return $local
 }
 
@@ -791,7 +776,7 @@ function Get-GpuLiveStats {
         if (-not $smiRow -and $kmtIdx -lt $kmt.Count) { $kd = $kmt[$kmtIdx]; $kmtIdx++ }
         $age = $null; try { $age = [int]((Get-Date) - $g.DriverDate).TotalDays } catch {}
         $total = $totals[$g.Name]
-        $vendor = if ($g.Name -match 'NVIDIA') { 'NVIDIA' } elseif ($g.Name -match 'AMD|Radeon') { 'AMD' } elseif ($g.Name -match 'Intel') { 'Intel' } else { '' }
+        $vendor = Get-GpuVendor $g
 
         $vramTxt = $null
         if ($smiRow) { $vramTxt = "$($smiRow.MemUsed) / $($smiRow.MemTotal) MB" }
