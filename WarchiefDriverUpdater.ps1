@@ -12,19 +12,11 @@
 
     Copyright (C) 2026 dontshome  <https://github.com/dontshome/Warchief-Driver-Updater>
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+    All rights reserved. Free for personal, non-commercial use. Copying,
+    modifying, redistributing or selling this program requires written
+    permission from the copyright holder. See the LICENSE file.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program (see the LICENSE file).  If not, see
-    <https://www.gnu.org/licenses/>.
+    This program is distributed WITHOUT ANY WARRANTY.
 #>
 param(
     [switch]$SelfTest,      # run headless diagnostics (no GUI) and exit
@@ -1322,15 +1314,13 @@ $window.Add_StateChanged({
     }
 })
 
-# GPL "Appropriate Legal Notices": copyright + no-warranty + license link
+# About dialog: copyright + no-warranty + license link
 $BtnAbout.Add_Click({
     $msg = "Warchief Driver Updater  v$script:AppVersion`n`n" +
            "Copyright (C) 2026 dontshome`n`n" +
            "This program comes with ABSOLUTELY NO WARRANTY.`n" +
-           "It is free software, and you are welcome to redistribute it under " +
-           "the terms of the GNU General Public License v3 or later.`n`n" +
-           "If you reuse this code, the GPL requires your project to remain " +
-           "open source and to credit this original work.`n`n" +
+           "All rights reserved. Free for personal, non-commercial use.`n" +
+           "Copying, modifying or redistributing it requires written permission.`n`n" +
            "Source & license:`nhttps://github.com/$script:GitHubRepo`n`n" +
            "Open the project page now?"
     $r = [Windows.MessageBox]::Show($msg, 'About Warchief Driver Updater', 'YesNo', 'Information')

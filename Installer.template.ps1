@@ -9,7 +9,7 @@
       -Silent     install without prompts (Start Menu + desktop shortcut)
       -Uninstall  remove the app (combine with -Silent for no prompts)
 
-    Copyright (C) 2026 dontshome. GNU GPL v3 or later; see the LICENSE file.
+    Copyright (C) 2026 dontshome. All rights reserved; see the LICENSE file.
     This program comes with ABSOLUTELY NO WARRANTY.
 #>
 param(

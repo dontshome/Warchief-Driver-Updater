@@ -107,7 +107,7 @@ fishing videos are never touched. This tool doesn't modify Windows, doesn't run 
 doesn't phone home, has no ads, no accounts, no subscriptions, and no opinions about your
 browser homepage.
 
-**"How do I know it's not up to something?"** It's open source — every single line of code is in
+**"How do I know it's not up to something?"** The full source code is published — every single line is in
 this repository, readable by anyone, and it's plain PowerShell (a scripting language, not a
 mystery blob). Paranoid? Good instinct! Read [WarchiefDriverUpdater.ps1](WarchiefDriverUpdater.ps1)
 yourself or build the exe from source with one command. The only thing it writes outside its
@@ -195,21 +195,16 @@ for your OS* — it never lies about a current driver being available when the v
 
 ## Contributing
 
-Issues and pull requests are welcome. Keep it dependency-free, keep it Horde. 🩸
+Bug reports and ideas are welcome as issues. Code contributions are by invitation only. Keep it Horde. 🩸
 
-## License & credit
+## License
 
-Copyright © 2026 **[dontshome](https://github.com/dontshome)**. Licensed under the
-**[GNU General Public License v3.0](LICENSE)** (or later).
+Copyright © 2026 **[dontshome](https://github.com/dontshome)**. **All rights reserved.**
 
-This is **copyleft** open source — you're free to use, study, share, and modify it, but:
+Warchief Driver Updater is free to download and use for personal, non-commercial use.
+Copying, modifying, redistributing or selling it requires written permission. See the
+[LICENSE](LICENSE) file for the full terms, and click the **ⓘ** button in the app for the
+in-program notice.
 
-- ✅ **You must credit this original project** — keep the copyright notice and a link back to
-  [this repository](https://github.com/dontshome/Warchief-Driver-Updater).
-- ✅ **If you distribute a modified version, it must also be open source** under the GPL, so the
-  whole community keeps benefiting.
-- ✅ **State your changes** so bugs in forks aren't blamed on the original.
-
-In short: build on it, improve it, share it — just keep it open and give credit where it's due.
-See the [LICENSE](LICENSE) file for the full legal terms, and click the **ⓘ** button in the app
-for the in-program notice.
+Versions up to and including v2.3.1 were released under the GNU GPL v3, and copies of those
+versions keep that license.

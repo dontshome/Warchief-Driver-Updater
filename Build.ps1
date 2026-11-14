@@ -8,7 +8,7 @@
 
     Usage:  powershell -ExecutionPolicy Bypass -File .\Build.ps1
 
-    Copyright (C) 2026 dontshome. GNU GPL v3 or later; see the LICENSE file.
+    Copyright (C) 2026 dontshome. All rights reserved; see the LICENSE file.
     This program comes with ABSOLUTELY NO WARRANTY.
 #>
 param(
@@ -138,7 +138,7 @@ Invoke-PS2EXE -inputFile (Join-Path $root 'WarchiefDriverUpdater.ps1') -outputFi
     -iconFile $icon -noConsole -STA `
     -title 'Warchief Driver Updater' -description 'Horde-themed GPU driver updater' `
     -company 'Warchief Driver Updater contributors' -product 'Warchief Driver Updater' `
-    -copyright 'MIT License' -version "$Version.0"
+    -copyright 'Copyright (C) 2026 dontshome. All rights reserved.' -version "$Version.0"
 if (-not (Test-Path $appExe)) { throw 'App compilation failed.' }
 
 # ---------------------------------------------------------------------------
@@ -157,7 +157,7 @@ if (-not $SkipInstaller) {
             -iconFile $icon -noConsole -STA `
             -title 'Warchief Driver Updater Setup' -description 'Installer for Warchief Driver Updater' `
             -company 'Warchief Driver Updater contributors' -product 'Warchief Driver Updater' `
-            -copyright 'MIT License' -version "$Version.0"
+            -copyright 'Copyright (C) 2026 dontshome. All rights reserved.' -version "$Version.0"
     } finally {
         Remove-Item $tmp -Force -ErrorAction SilentlyContinue
     }
